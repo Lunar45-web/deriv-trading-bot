@@ -1,4 +1,4 @@
-deriv-api
+python-deriv-api
 websockets
 flask
 aiohttp

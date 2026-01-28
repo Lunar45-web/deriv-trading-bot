@@ -1,8 +1,6 @@
 import os
 import time
-import json
-import asyncio
-import websockets
+import requests
 from datetime import datetime
 from flask import Flask, jsonify
 import threading
@@ -10,21 +8,25 @@ import random
 
 app = Flask(__name__)
 
-# ===== CONFIGURATION =====
-API_TOKEN = os.getenv('DEMO_API_TOKEN', 's4TVgxiEc36iXSM')  # YOUR CORRECT TOKEN!
-APP_ID = 1089
+# ===== YOUR CORRECT TOKEN =====
+API_TOKEN = os.getenv('DEMO_API_TOKEN', 's4TVgxiEc36iXSM')  # ← YOUR TOKEN
+print(f"🔑 Using token: {API_TOKEN}")
 
-print(f"🔑 Using NEW Deriv API token: {API_TOKEN}")
+# ===== Deriv API Configuration =====
+BASE_URL = "https://api.deriv.com"
+APP_ID = 1089  # Deriv app ID
 
-# NEW Deriv WebSocket endpoints
-WS_URL = "wss://ws.binaryws.com/websockets/v3"
-WS_URL_V2 = "wss://ws.derivws.com/websockets/v3"
+# Headers for Deriv API
+HEADERS = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Authorization': f'Bearer {API_TOKEN}'
+}
 
-class DerivWebSocketBot:
+class SimpleDerivBot:
     def __init__(self):
         self.running = False
         self.connected = False
-        self.websocket = None
         self.balance = 10000.00
         self.total_trades = 0
         self.wins = 0
@@ -32,41 +34,57 @@ class DerivWebSocketBot:
         self.session_profit = 0.0
         self.last_trade_time = None
         
-    async def connect_websocket(self):
-        """Connect to Deriv WebSocket"""
-        try:
-            print(f"🔌 Connecting to WebSocket...")
-            self.websocket = await websockets.connect(WS_URL_V2)
-            
-            # Authorize with token
-            auth_msg = {
-                "authorize": API_TOKEN
-            }
-            
-            await self.websocket.send(json.dumps(auth_msg))
-            response = await self.websocket.recv()
-            data = json.loads(response)
-            
-            if "error" in data:
-                print(f"❌ Auth failed: {data['error']['message']}")
-                return False
-            
-            if "authorize" in data:
-                print(f"✅ WebSocket Connected!")
-                print(f"   Account: {data['authorize'].get('loginid', 'Unknown')}")
-                print(f"   Currency: {data['authorize'].get('currency', 'USD')}")
-                self.connected = True
-                self.balance = float(data['authorize'].get('balance', 10000))
-                return True
-            
-        except Exception as e:
-            print(f"❌ WebSocket connection failed: {e}")
-            return False
+        # Test connection immediately
+        self.test_connection()
     
-    async def buy_contract(self, contract_type, barrier):
-        """Buy a contract via WebSocket"""
+    def test_connection(self):
+        """Test connection to Deriv API"""
+        print("🔌 Testing Deriv API connection...")
         try:
-            buy_request = {
+            # First, try to get balance
+            response = requests.post(
+                f"{BASE_URL}/balance",
+                headers=HEADERS,
+                json={},
+                timeout=10
+            )
+            
+            print(f"📡 Balance API Status: {response.status_code}")
+            print(f"📡 Response: {response.text[:200]}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'error' not in data:
+                    self.balance = float(data.get('balance', {}).get('balance', 10000))
+                    self.connected = True
+                    print(f"✅ API CONNECTED! Balance: ${self.balance:.2f}")
+                    
+                    # Also test active symbols
+                    symbols_response = requests.post(
+                        f"{BASE_URL}/active_symbols",
+                        headers=HEADERS,
+                        json={"active_symbols": "brief", "product_type": "basic"},
+                        timeout=10
+                    )
+                    
+                    if symbols_response.status_code == 200:
+                        print("✅ Active symbols retrieved")
+                    return True
+                else:
+                    print(f"❌ API Error: {data.get('error', {})}")
+            else:
+                print(f"❌ HTTP Error: {response.status_code}")
+                
+        except Exception as e:
+            print(f"❌ Connection error: {type(e).__name__}: {str(e)}")
+        
+        print("⚠️ API connection failed, using simulation mode")
+        return False
+    
+    def buy_contract(self, contract_type, barrier):
+        """Buy a contract on Deriv"""
+        try:
+            buy_data = {
                 "buy": 1,
                 "price": 1,
                 "parameters": {
@@ -81,63 +99,70 @@ class DerivWebSocketBot:
                 }
             }
             
-            await self.websocket.send(json.dumps(buy_request))
-            response = await self.websocket.recv()
-            data = json.loads(response)
+            print(f"📤 Buying {contract_type} {barrier}...")
             
-            if "error" in data:
-                print(f"❌ Buy error: {data['error']['message']}")
-                return None
+            response = requests.post(
+                f"{BASE_URL}/buy",
+                headers=HEADERS,
+                json=buy_data,
+                timeout=15
+            )
             
-            if "buy" in data:
-                contract_id = data['buy']['contract_id']
+            print(f"📡 Buy Response Status: {response.status_code}")
+            print(f"📡 Buy Response: {response.text[:300]}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'error' in data:
+                    print(f"❌ Buy error: {data['error']}")
+                    return None
+                
+                contract_id = data.get('buy', {}).get('contract_id')
                 print(f"✅ Contract purchased: {contract_id}")
                 
-                # Wait for contract completion
-                await asyncio.sleep(2)
+                # Wait for contract to settle
+                time.sleep(3)
                 
                 # Check contract result
-                proposal_request = {
-                    "proposal_open_contract": 1,
-                    "contract_id": contract_id
-                }
+                contract_response = requests.post(
+                    f"{BASE_URL}/proposal_open_contract",
+                    headers=HEADERS,
+                    json={"proposal_open_contract": 1, "contract_id": contract_id},
+                    timeout=10
+                )
                 
-                await self.websocket.send(json.dumps(proposal_request))
-                response = await self.websocket.recv()
-                contract_data = json.loads(response)
-                
-                if "proposal_open_contract" in contract_data:
-                    profit = float(contract_data['proposal_open_contract']['profit'])
-                    payout = float(contract_data['proposal_open_contract']['payout'])
-                    
-                    return {
-                        "success": True,
-                        "contract_id": contract_id,
-                        "profit": profit,
-                        "payout": payout,
-                        "result": "win" if profit > 0 else "loss"
-                    }
+                if contract_response.status_code == 200:
+                    contract_data = contract_response.json()
+                    if 'error' not in contract_data:
+                        profit = float(contract_data.get('proposal_open_contract', {}).get('profit', 0))
+                        payout = float(contract_data.get('proposal_open_contract', {}).get('payout', 0))
+                        
+                        print(f"💰 Trade result: ${profit:.2f}")
+                        return {
+                            "success": True,
+                            "contract_id": contract_id,
+                            "profit": profit,
+                            "payout": payout,
+                            "result": "win" if profit > 0 else "loss"
+                        }
             
             return None
             
         except Exception as e:
-            print(f"❌ Trade error: {e}")
+            print(f"❌ Trade error: {type(e).__name__}: {str(e)}")
             return None
     
-    async def trading_loop_async(self):
-        """Async trading loop"""
-        # Try to connect to WebSocket
-        connected = await self.connect_websocket()
+    def trading_loop(self):
+        """Main trading loop"""
+        print("🔄 Trading started...")
         
-        if not connected:
-            print("⚠️ Falling back to simulation mode")
-        
-        while self.running and self.total_trades < 100:
+        trade_count = 0
+        while self.running and trade_count < 50:
             try:
-                # Wait 2-3 minutes
+                # Wait 2-3 minutes between trades
                 wait_time = random.randint(120, 180)
-                print(f"⏳ Next trade in {wait_time//60} minutes...")
-                await asyncio.sleep(wait_time)
+                print(f"⏳ Waiting {wait_time//60} minutes for next trade...")
+                time.sleep(wait_time)
                 
                 if not self.running:
                     break
@@ -153,15 +178,16 @@ class DerivWebSocketBot:
                 
                 print(f"📊 Decision: {reason}")
                 
-                if self.connected and self.websocket:
-                    # REAL TRADE via WebSocket
-                    trade_result = await self.buy_contract(contract_type, barrier)
+                if self.connected:
+                    # Try REAL trade
+                    trade_result = self.buy_contract(contract_type, barrier)
                     
                     if trade_result and trade_result["success"]:
                         self.total_trades += 1
                         self.session_profit += trade_result["profit"]
                         self.balance += trade_result["profit"]
                         self.last_trade_time = datetime.now()
+                        trade_count += 1
                         
                         if trade_result["result"] == "win":
                             self.wins += 1
@@ -171,15 +197,20 @@ class DerivWebSocketBot:
                             print(f"❌ REAL LOSS! -${abs(trade_result['profit']):.2f}")
                         
                         print(f"💰 Balance: ${self.balance:.2f} | Session: ${self.session_profit:.2f}")
+                        
+                        # Update connection status
+                        if trade_result["profit"] != 0:
+                            print(f"🎯 REAL TRADE CONFIRMED! Deriv account updated.")
                     
                     else:
-                        print(f"⚠️ Trade failed, using simulation")
-                        # Fallback to simulation
+                        print("⚠️ Real trade failed, using simulation")
                         self.simulate_trade(reason)
+                        trade_count += 1
                 
                 else:
-                    # SIMULATION trade
+                    # Simulation mode
                     self.simulate_trade(reason)
+                    trade_count += 1
                 
                 # Check stop conditions
                 if self.session_profit >= 50:
@@ -191,18 +222,14 @@ class DerivWebSocketBot:
                     break
                 
             except Exception as e:
-                print(f"⚠️ Trading error: {e}")
-                await asyncio.sleep(10)
+                print(f"⚠️ Loop error: {e}")
+                time.sleep(10)
         
-        print(f"🏁 Trading finished. Trades: {self.total_trades}")
+        print(f"🏁 Trading finished. Total trades: {self.total_trades}")
         self.running = False
-        
-        # Close WebSocket
-        if self.websocket:
-            await self.websocket.close()
     
     def simulate_trade(self, reason):
-        """Simulate a trade (fallback)"""
+        """Simulate a trade"""
         is_win = random.random() < 0.55
         profit = 0.95 if is_win else -1.0
         
@@ -223,23 +250,18 @@ class DerivWebSocketBot:
     def start(self):
         if not self.running:
             self.running = True
-            # Start async loop in thread
-            thread = threading.Thread(target=self.run_async, daemon=True)
+            thread = threading.Thread(target=self.trading_loop, daemon=True)
             thread.start()
             print("🚀 Bot started!")
             return True
         return False
-    
-    def run_async(self):
-        """Run async loop in thread"""
-        asyncio.run(self.trading_loop_async())
     
     def stop(self):
         self.running = False
         print("🛑 Bot stopped")
 
 # Create bot instance
-bot = DerivWebSocketBot()
+bot = SimpleDerivBot()
 
 # ===== FLASK ROUTES =====
 @app.route('/')
@@ -259,12 +281,12 @@ def dashboard():
     .connected{{color:green;}} .disconnected{{color:orange;}}
     </style></head>
     <body><div class="container">
-    <h1>🤖 Deriv Trading Bot (WebSocket)</h1>
+    <h1>🤖 Simple Deriv Trading Bot</h1>
     <p><strong>Status:</strong> <span class="{'running' if bot.running else 'stopped'}">
     {'🟢 RUNNING' if bot.running else '🔴 STOPPED'}</span></p>
-    <p><strong>Connection:</strong> <span class="{'connected' if bot.connected else 'disconnected'}">
-    {'✅ WebSocket CONNECTED' if bot.connected else '⚠️ SIMULATION MODE'}</span></p>
-    <p><strong>Token:</strong> {API_TOKEN[:10]}... (NEW Deriv API)</p>
+    <p><strong>API Connection:</strong> <span class="{'connected' if bot.connected else 'disconnected'}">
+    {'✅ CONNECTED to Deriv' if bot.connected else '⚠️ SIMULATION MODE'}</span></p>
+    <p><strong>Token:</strong> {API_TOKEN} (length: {len(API_TOKEN)})</p>
     
     <div class="stats">
         <div class="stat-box"><h3>💰 Balance</h3><p>${bot.balance:.2f}</p></div>
@@ -278,19 +300,22 @@ def dashboard():
     <div>
         <button onclick="window.location.href='/start'">▶️ Start Bot</button>
         <button onclick="window.location.href='/stop'">⏹️ Stop Bot</button>
-        <button onclick="window.location.href='/test'">🔧 Test Connection</button>
+        <button onclick="window.location.href='/test'">🔧 Test API</button>
+        <button onclick="window.location.href='/force-trade'">⚡ Force Test Trade</button>
     </div>
     
     <div style="margin-top:30px; padding:15px; background:#e9f7fe; border-radius:8px;">
-        <h3>ℹ️ About Your Token:</h3>
-        <p>✅ <strong>Your token IS CORRECT!</strong> It's the NEW Deriv API format.</p>
-        <p>✅ <strong>Length:</strong> {len(API_TOKEN)} characters (correct for new API)</p>
-        <p>✅ <strong>Type:</strong> OAuth2 token (not JWT)</p>
-        <p>🔄 <strong>Mode:</strong> {'REAL WebSocket trading' if bot.connected else 'SIMULATION (testing connection)'}</p>
+        <h3>🔧 Debug Information:</h3>
+        <p><strong>Token:</strong> {API_TOKEN}</p>
+        <p><strong>API URL:</strong> {BASE_URL}</p>
+        <p><strong>Connection Status:</strong> {'✅ Connected' if bot.connected else '❌ Failed'}</p>
+        <p><strong>Mode:</strong> {'REAL Trading' if bot.connected else 'SIMULATION'}</p>
+        <p><strong>Check Deriv:</strong> Your token should show "Last used: Just now" if connected</p>
     </div>
     
     <p style="margin-top:30px; color:#666;">
-        Bot will run for 10 hours. Trades will be {'REAL on your Deriv account' if bot.connected else 'SIMULATED for testing'}.
+        {'✅ Bot is trading on REAL Deriv API' if bot.connected else '⚠️ Bot is in SIMULATION mode. Check API connection.'}
+        <br>Auto-refreshes every 10 seconds.
     </p>
     </div></body></html>
     """
@@ -306,13 +331,33 @@ def stop_bot():
     return jsonify({"status": "stopped"})
 
 @app.route('/test')
-def test_connection():
+def test_api():
+    """Test API connection"""
+    connected = bot.test_connection()
     return jsonify({
-        "token_length": len(API_TOKEN),
-        "token_preview": API_TOKEN[:10] + "...",
-        "api_type": "NEW Deriv API (OAuth2)",
-        "expected_format": "Short token (like yours)",
-        "websocket_connected": bot.connected
+        "connected": connected,
+        "token": API_TOKEN[:5] + "..." + API_TOKEN[-5:],
+        "api_url": BASE_URL,
+        "message": "API is working!" if connected else "API connection failed"
+    })
+
+@app.route('/force-trade')
+def force_trade():
+    """Force a test trade"""
+    if bot.connected:
+        result = bot.buy_contract("DIGITUNDER", 7)
+        if result and result["success"]:
+            return jsonify({
+                "status": "real_trade_executed",
+                "profit": result["profit"],
+                "result": result["result"]
+            })
+    
+    # Simulate trade
+    bot.simulate_trade("Forced Test")
+    return jsonify({
+        "status": "simulated_trade",
+        "message": "Simulated trade executed"
     })
 
 # Auto-start bot

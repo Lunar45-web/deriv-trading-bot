@@ -1,4 +1,6 @@
 python-deriv-api
-websockets
-flask
-aiohttp
+dash
+pandas
+pandas_ta
+plotly
+gunicorn

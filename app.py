@@ -16,67 +16,62 @@ APP_ID = 1089
 
 # --- SMART MONEY MANAGEMENT ---
 BASE_STAKE = 2.0        
-RECOVERY_MULTIPLIER = 2.5 # Aggressive recovery for Over 2
-MAX_RECOVERY_ATTEMPTS = 1 
+RECOVERY_MULTIPLIER = 3.0 # Set to 3x to conquer the 40% payout
+MAX_RECOVERY_ATTEMPTS = 1 # Safety cap
 
 # --- DATA STORE ---
 data_store = {
     'symbol': 'R_100',
-    'times': deque(maxlen=200),
-    'prices': deque(maxlen=200), # Larger buffer for Analysis
+    'times': deque(maxlen=100),
+    'prices': deque(maxlen=100),
     'digits': deque(maxlen=20),
     'balance': "Waiting...",
-    'status': "Initializing Analytics...",
+    'status': "Initializing Digit Logic...",
     'trades': [], 
     'wins': 0,
     'losses': 0,
     'consecutive_losses': 0,
     'is_trading': False,
-    # Live Indicator Values (For Display)
-    'rsi': 0,
-    'macd': 0,
-    'ema': 0
+    'rsi': 50 # Default neutral
 }
 
 # --- DASHBOARD ---
 app = Dash(__name__)
 server = app.server
 
-app.layout = html.Div(style={'backgroundColor': '#0b0c10', 'color': '#c5c6c7', 'fontFamily': 'sans-serif', 'padding': '20px'}, children=[
+app.layout = html.Div(style={'backgroundColor': '#000000', 'color': '#00ff00', 'fontFamily': 'Courier New', 'padding': '20px'}, children=[
     
     html.Div([
-        html.H2("TITAN QUANTITATIVE TRADER", style={'color': '#66fcf1', 'letterSpacing': '2px'}),
-        html.H3(id='live-balance', children="Balance: Loading...", style={'color': '#fff', 'fontWeight': 'bold'}),
-        html.Div(id='live-status', children="Status: Calibrating Indicators...", style={'color': '#45a29e', 'fontSize': '18px'}),
-    ], style={'textAlign': 'center', 'borderBottom': '2px solid #1f2833', 'paddingBottom': '15px'}),
+        html.H2("DERIV DIGIT DOMINATOR", style={'color': '#00ff00', 'fontWeight': 'bold'}),
+        html.H3(id='live-balance', children="Balance: Loading...", style={'color': '#fff'}),
+        html.Div(id='live-status', children="Status: Scanning Digits...", style={'color': '#ffff00', 'fontSize': '18px'}),
+    ], style={'textAlign': 'center', 'borderBottom': '1px solid #333', 'paddingBottom': '15px'}),
 
-    # Live Analytics Panel
-    html.Div([
-        html.Div(id='indicator-panel', style={'fontSize': '16px', 'color': '#ffd700', 'margin': '10px'})
-    ], style={'textAlign': 'center', 'backgroundColor': '#1f2833', 'padding': '10px', 'borderRadius': '5px'}),
+    # RSI Safety Gauge
+    html.Div(id='rsi-panel', style={'textAlign': 'center', 'color': '#00ffff', 'margin': '10px'}),
 
     dcc.Graph(id='live-chart', animate=False),
 
     html.Div([
-        html.H4("Digit Heatmap:"),
-        html.Div(id='last-digits', style={'fontSize': '24px', 'letterSpacing': '5px'})
-    ], style={'textAlign': 'center', 'marginTop': '20px'}),
+        html.H4("LIVE DIGIT STREAM:"),
+        html.Div(id='last-digits', style={'fontSize': '28px', 'letterSpacing': '8px', 'fontWeight': 'bold'})
+    ], style={'textAlign': 'center', 'marginTop': '20px', 'backgroundColor': '#111', 'padding': '15px'}),
     
     dcc.Interval(id='graph-update', interval=1000, n_intervals=0)
 ])
 
-# --- EXECUTION ENGINE ---
+# --- TRADING EXECUTION ---
 async def place_trade(api, contract_type, barrier, prediction):
     global data_store
     
-    # Smart Staking Logic
+    # 1. Money Management (The 3x Fix)
     current_stake = BASE_STAKE
     if data_store['consecutive_losses'] > 0 and data_store['consecutive_losses'] <= MAX_RECOVERY_ATTEMPTS:
-        current_stake = BASE_STAKE * RECOVERY_MULTIPLIER
-        print(f"⚠️ RECOVERY STAKE: ${current_stake}", flush=True)
+        current_stake = round(BASE_STAKE * RECOVERY_MULTIPLIER, 2)
+        print(f"⚠️ RECOVERY MODE: ${current_stake}", flush=True)
 
     try:
-        data_store['status'] = f"SNIPING: {prediction} (${current_stake})..."
+        data_store['status'] = f"FIRING: {prediction} (${current_stake})..."
         data_store['is_trading'] = True 
         
         proposal = await api.proposal({
@@ -107,69 +102,13 @@ async def place_trade(api, contract_type, barrier, prediction):
         data_store['is_trading'] = False
 
     except Exception as e:
-        print(f"Execution Error: {e}", flush=True)
+        print(f"Error: {e}", flush=True)
         data_store['is_trading'] = False
 
-# --- ANALYTICS BRAIN ---
-def analyze_market(api, loop):
-    global data_store
-    
-    # Need at least 50 ticks to calculate EMA/RSI accurately
-    if len(data_store['prices']) < 50:
-        return
-
-    # Convert Deque to Pandas Series for math
-    price_series = pd.Series(list(data_store['prices']))
-    
-    # 1. CALCULATE INDICATORS
-    # RSI (Relative Strength Index) - Period 14
-    rsi = ta.rsi(price_series, length=14)
-    current_rsi = rsi.iloc[-1] if rsi is not None else 50
-    
-    # EMA (Exponential Moving Average) - Period 50 (Trend)
-    ema = ta.ema(price_series, length=50)
-    current_ema = ema.iloc[-1] if ema is not None else 0
-    current_price = price_series.iloc[-1]
-    
-    # MACD (Momentum) - Fast 12, Slow 26
-    macd = ta.macd(price_series)
-    # pandas_ta returns columns: MACD_12_26_9, MACDh_12_26_9 (Hist), MACDs_12_26_9 (Signal)
-    macd_line = macd['MACD_12_26_9'].iloc[-1] if macd is not None else 0
-    signal_line = macd['MACDs_12_26_9'].iloc[-1] if macd is not None else 0
-
-    # Store for Dashboard
-    data_store['rsi'] = round(current_rsi, 2)
-    data_store['macd'] = round(macd_line, 5)
-    data_store['ema'] = round(current_ema, 2)
-    
-    # 2. THE TITAN STRATEGY LOGIC
-    # Condition A: UPTREND (Price > EMA 50)
-    is_uptrend = current_price > current_ema
-    
-    # Condition B: MOMENTUM (RSI > 50 but not overbought > 75)
-    is_momentum = 50 < current_rsi < 75
-    
-    # Condition C: TRIGGER (MACD > Signal)
-    is_trigger = macd_line > signal_line
-
-    # EXECUTE
-    if is_uptrend and is_momentum and is_trigger:
-        data_store['status'] = "⭐⭐⭐ PERFECT SETUP DETECTED ⭐⭐⭐"
-        asyncio.run_coroutine_threadsafe(
-            place_trade(api, "DIGITOVER", "2", "Titan Over 2"),
-            loop
-        )
-    else:
-        # Feedback for user on why it's waiting
-        if not is_uptrend:
-            data_store['status'] = "Waiting: Downtrend (Price < EMA)"
-        elif not is_momentum:
-            data_store['status'] = f"Waiting: Weak Momentum (RSI {round(current_rsi,1)})"
-        elif not is_trigger:
-            data_store['status'] = "Waiting: MACD Cross"
-
+# --- THE LOGIC: DIGITS + RSI FILTER ---
 def process_tick(tick, api, loop):
     global data_store
+    
     try:
         quote = float(tick['tick']['quote'])
         epoch = int(tick['tick']['epoch'])
@@ -180,8 +119,44 @@ def process_tick(tick, api, loop):
         data_store['prices'].append(quote)
         data_store['digits'].append(last_digit)
         
-        if not data_store['is_trading']:
-            analyze_market(api, loop)
+        if data_store['is_trading']:
+            return
+
+        # 1. Update RSI (The Safety Filter)
+        if len(data_store['prices']) > 20:
+            price_series = pd.Series(list(data_store['prices']))
+            rsi = ta.rsi(price_series, length=14)
+            data_store['rsi'] = round(rsi.iloc[-1], 1) if rsi is not None else 50
+        
+        current_rsi = data_store['rsi']
+
+        # 2. STRATEGY A: UNDER 7 (Reversal)
+        # Logic: High Digit (8/9) -> Bet Low.
+        # Filter: DON'T bet if RSI > 75 (Market is skyrocketing)
+        if last_digit >= 8:
+            if current_rsi < 75:
+                asyncio.run_coroutine_threadsafe(
+                    place_trade(api, "DIGITUNDER", "7", "Under 7 (Digit Reversion)"),
+                    loop
+                )
+            else:
+                data_store['status'] = f"⚠️ Skipped Under 7: RSI Too High ({current_rsi})"
+            return
+
+        # 3. STRATEGY B: OVER 2 (Flat/Safe)
+        # Logic: Low Digit (0/1/2) + Flat Market -> Bet High.
+        # Filter: DON'T bet if RSI < 25 (Market is crashing)
+        tick_list = list(data_store['prices'])[-5:]
+        if len(tick_list) == 5:
+            volatility = max(tick_list) - min(tick_list)
+            if volatility < 0.4 and last_digit <= 2:
+                if current_rsi > 25:
+                    asyncio.run_coroutine_threadsafe(
+                        place_trade(api, "DIGITOVER", "2", "Over 2 (Safe Zone)"),
+                        loop
+                    )
+                else:
+                    data_store['status'] = f"⚠️ Skipped Over 2: RSI Too Low ({current_rsi})"
 
     except Exception as e:
         print(f"Tick Error: {e}", flush=True)
@@ -210,28 +185,26 @@ async def run_trader():
      Output('live-balance', 'children'),
      Output('live-status', 'children'),
      Output('last-digits', 'children'),
-     Output('indicator-panel', 'children')],
+     Output('rsi-panel', 'children')],
     [Input('graph-update', 'n_intervals')]
 )
 def update_dashboard(n):
-    # Candlestick-style chart
     trace = go.Scatter(
         x=list(data_store['times']), y=list(data_store['prices']),
-        mode='lines', line=dict(color='#66fcf1', width=2), fill='tozeroy', fillcolor='rgba(102, 252, 241, 0.1)'
+        mode='lines+markers', line=dict(color='#00ff00', width=2), marker=dict(size=5)
     )
     layout = go.Layout(
-        plot_bgcolor='#1f2833', paper_bgcolor='#0b0c10',
-        font=dict(color='#c5c6c7'), margin=dict(l=40, r=20, t=30, b=30), height=400,
+        plot_bgcolor='#111', paper_bgcolor='#000',
+        font=dict(color='#00ff00'), margin=dict(l=40, r=20, t=30, b=30), height=350,
         xaxis=dict(showgrid=False), yaxis=dict(gridcolor='#333')
     )
     
     digits_display = [
-        html.Span(str(d), style={'color': '#66fcf1' if d>=3 else '#ff3333', 'padding': '0 6px', 'fontWeight': 'bold'})
+        html.Span(str(d), style={'color': '#ff0000' if d>=8 else '#00ff00' if d<=2 else '#888', 'padding': '0 8px', 'fontWeight': 'bold'})
         for d in list(data_store['digits'])
     ]
     
-    # Indicator Stats
-    stats = f"RSI: {data_store['rsi']} | MACD: {data_store['macd']} | EMA: {data_store['ema']} | Wins: {data_store['wins']} / Losses: {data_store['losses']}"
+    stats = f"Current RSI: {data_store['rsi']} | Wins: {data_store['wins']} / Losses: {data_store['losses']}"
 
     return {'data': [trace], 'layout': layout}, data_store['balance'], data_store['status'], digits_display, stats
 

@@ -2,9 +2,8 @@ import asyncio
 import os
 import threading
 import pandas as pd
-import pandas_ta as ta
 import plotly.graph_objs as go
-from collections import deque
+from collections import deque, Counter
 from datetime import datetime
 from dash import Dash, dcc, html
 from dash.dependencies import Input, Output
@@ -14,48 +13,52 @@ from deriv_api import DerivAPI
 API_TOKEN = os.getenv('DERIV_API_TOKEN', 's4TVgxiEc36iXSM')
 APP_ID = 1089
 
-# --- SMART MONEY MANAGEMENT ---
+# --- MONEY MANAGEMENT ---
 BASE_STAKE = 2.0        
-RECOVERY_MULTIPLIER = 3.0 # Set to 3x to conquer the 40% payout
-MAX_RECOVERY_ATTEMPTS = 1 # Safety cap
+RECOVERY_MULTIPLIER = 3.0 # 3x covers the 40% payout loss
+MAX_RECOVERY_ATTEMPTS = 1
 
 # --- DATA STORE ---
 data_store = {
     'symbol': 'R_100',
     'times': deque(maxlen=100),
     'prices': deque(maxlen=100),
-    'digits': deque(maxlen=20),
+    'digits': deque(maxlen=100), # Expanded to 100 for Statistics
     'balance': "Waiting...",
-    'status': "Initializing Digit Logic...",
+    'status': "Analyzing Digit Frequencies...",
     'trades': [], 
     'wins': 0,
     'losses': 0,
     'consecutive_losses': 0,
     'is_trading': False,
-    'rsi': 50 # Default neutral
+    'digit_stats': {i: 0 for i in range(10)} # Stores count of 0-9
 }
 
 # --- DASHBOARD ---
 app = Dash(__name__)
 server = app.server
 
-app.layout = html.Div(style={'backgroundColor': '#000000', 'color': '#00ff00', 'fontFamily': 'Courier New', 'padding': '20px'}, children=[
+app.layout = html.Div(style={'backgroundColor': '#111', 'color': '#fff', 'fontFamily': 'sans-serif', 'padding': '20px'}, children=[
     
     html.Div([
-        html.H2("DERIV DIGIT DOMINATOR", style={'color': '#00ff00', 'fontWeight': 'bold'}),
+        html.H2("DERIV FREQUENCY MASTER", style={'color': '#00ff00', 'fontWeight': 'bold'}),
         html.H3(id='live-balance', children="Balance: Loading...", style={'color': '#fff'}),
-        html.Div(id='live-status', children="Status: Scanning Digits...", style={'color': '#ffff00', 'fontSize': '18px'}),
+        html.Div(id='live-status', children="Status: Building Statistics...", style={'color': '#ffff00', 'fontSize': '16px'}),
     ], style={'textAlign': 'center', 'borderBottom': '1px solid #333', 'paddingBottom': '15px'}),
 
-    # RSI Safety Gauge
-    html.Div(id='rsi-panel', style={'textAlign': 'center', 'color': '#00ffff', 'margin': '10px'}),
-
-    dcc.Graph(id='live-chart', animate=False),
-
+    # Live Digit Frequency Chart
     html.Div([
-        html.H4("LIVE DIGIT STREAM:"),
-        html.Div(id='last-digits', style={'fontSize': '28px', 'letterSpacing': '8px', 'fontWeight': 'bold'})
-    ], style={'textAlign': 'center', 'marginTop': '20px', 'backgroundColor': '#111', 'padding': '15px'}),
+        dcc.Graph(id='freq-chart', config={'displayModeBar': False}, style={'height': '250px'})
+    ], style={'margin': '20px 0', 'border': '1px solid #333'}),
+
+    # Price Chart
+    dcc.Graph(id='live-chart', animate=False, style={'height': '300px'}),
+
+    # Last 15 Digits Stream
+    html.Div([
+        html.H4("LIVE FEED:"),
+        html.Div(id='last-digits', style={'fontSize': '24px', 'letterSpacing': '8px', 'fontWeight': 'bold'})
+    ], style={'textAlign': 'center', 'marginTop': '10px', 'backgroundColor': '#000', 'padding': '10px'}),
     
     dcc.Interval(id='graph-update', interval=1000, n_intervals=0)
 ])
@@ -64,14 +67,14 @@ app.layout = html.Div(style={'backgroundColor': '#000000', 'color': '#00ff00', '
 async def place_trade(api, contract_type, barrier, prediction):
     global data_store
     
-    # 1. Money Management (The 3x Fix)
+    # Smart Recovery (3x)
     current_stake = BASE_STAKE
     if data_store['consecutive_losses'] > 0 and data_store['consecutive_losses'] <= MAX_RECOVERY_ATTEMPTS:
         current_stake = round(BASE_STAKE * RECOVERY_MULTIPLIER, 2)
-        print(f"⚠️ RECOVERY MODE: ${current_stake}", flush=True)
+        print(f"⚠️ RECOVERY BET: ${current_stake}", flush=True)
 
     try:
-        data_store['status'] = f"FIRING: {prediction} (${current_stake})..."
+        data_store['status'] = f"SNIPING: {prediction} (${current_stake})..."
         data_store['is_trading'] = True 
         
         proposal = await api.proposal({
@@ -105,7 +108,7 @@ async def place_trade(api, contract_type, barrier, prediction):
         print(f"Error: {e}", flush=True)
         data_store['is_trading'] = False
 
-# --- THE LOGIC: DIGITS + RSI FILTER ---
+# --- THE LOGIC: DIGIT FREQUENCY ANALYSIS ---
 def process_tick(tick, api, loop):
     global data_store
     
@@ -119,44 +122,39 @@ def process_tick(tick, api, loop):
         data_store['prices'].append(quote)
         data_store['digits'].append(last_digit)
         
-        if data_store['is_trading']:
-            return
+        # Update Frequency Stats (Last 100 ticks)
+        if len(data_store['digits']) > 0:
+            counts = Counter(list(data_store['digits']))
+            # Normalize to percentages (roughly, since we keep ~100 digits)
+            total = len(data_store['digits'])
+            data_store['digit_stats'] = {k: (v/total)*100 for k, v in counts.items()}
+            
+            # Identify HOT (Green) and COLD (Red) digits
+            most_common = counts.most_common(1)[0][0]  # The "Green" Digit
+            
+            # --- STRATEGY LOGIC ---
+            if not data_store['is_trading'] and total >= 25: # Wait for data
+                
+                # STRATEGY 1: OVER 2 (Bias High)
+                # Condition: The Most Frequent Digit is High (4,5,6,7,8,9)
+                # Trigger: Current digit dips to 0, 1, or 2
+                if most_common >= 4: 
+                    if last_digit <= 2:
+                        asyncio.run_coroutine_threadsafe(
+                            place_trade(api, "DIGITOVER", "2", "Over 2 (High Bias)"),
+                            loop
+                        )
+                        return
 
-        # 1. Update RSI (The Safety Filter)
-        if len(data_store['prices']) > 20:
-            price_series = pd.Series(list(data_store['prices']))
-            rsi = ta.rsi(price_series, length=14)
-            data_store['rsi'] = round(rsi.iloc[-1], 1) if rsi is not None else 50
-        
-        current_rsi = data_store['rsi']
-
-        # 2. STRATEGY A: UNDER 7 (Reversal)
-        # Logic: High Digit (8/9) -> Bet Low.
-        # Filter: DON'T bet if RSI > 75 (Market is skyrocketing)
-        if last_digit >= 8:
-            if current_rsi < 75:
-                asyncio.run_coroutine_threadsafe(
-                    place_trade(api, "DIGITUNDER", "7", "Under 7 (Digit Reversion)"),
-                    loop
-                )
-            else:
-                data_store['status'] = f"⚠️ Skipped Under 7: RSI Too High ({current_rsi})"
-            return
-
-        # 3. STRATEGY B: OVER 2 (Flat/Safe)
-        # Logic: Low Digit (0/1/2) + Flat Market -> Bet High.
-        # Filter: DON'T bet if RSI < 25 (Market is crashing)
-        tick_list = list(data_store['prices'])[-5:]
-        if len(tick_list) == 5:
-            volatility = max(tick_list) - min(tick_list)
-            if volatility < 0.4 and last_digit <= 2:
-                if current_rsi > 25:
-                    asyncio.run_coroutine_threadsafe(
-                        place_trade(api, "DIGITOVER", "2", "Over 2 (Safe Zone)"),
-                        loop
-                    )
-                else:
-                    data_store['status'] = f"⚠️ Skipped Over 2: RSI Too Low ({current_rsi})"
+                # STRATEGY 2: UNDER 7 (Bias Low)
+                # Condition: The Most Frequent Digit is Low (0,1,2,3,4,5)
+                # Trigger: Current digit spikes to 8 or 9
+                if most_common <= 5:
+                    if last_digit >= 8:
+                        asyncio.run_coroutine_threadsafe(
+                            place_trade(api, "DIGITUNDER", "7", "Under 7 (Low Bias)"),
+                            loop
+                        )
 
     except Exception as e:
         print(f"Tick Error: {e}", flush=True)
@@ -182,31 +180,65 @@ async def run_trader():
 # --- CALLBACKS ---
 @app.callback(
     [Output('live-chart', 'figure'),
+     Output('freq-chart', 'figure'),
      Output('live-balance', 'children'),
      Output('live-status', 'children'),
-     Output('last-digits', 'children'),
-     Output('rsi-panel', 'children')],
+     Output('last-digits', 'children')],
     [Input('graph-update', 'n_intervals')]
 )
 def update_dashboard(n):
-    trace = go.Scatter(
+    # 1. Price Chart
+    trace_price = go.Scatter(
         x=list(data_store['times']), y=list(data_store['prices']),
-        mode='lines+markers', line=dict(color='#00ff00', width=2), marker=dict(size=5)
+        mode='lines', line=dict(color='#00ff00', width=2)
     )
-    layout = go.Layout(
+    layout_price = go.Layout(
         plot_bgcolor='#111', paper_bgcolor='#000',
-        font=dict(color='#00ff00'), margin=dict(l=40, r=20, t=30, b=30), height=350,
+        font=dict(color='#fff'), margin=dict(l=40, r=20, t=10, b=30),
         xaxis=dict(showgrid=False), yaxis=dict(gridcolor='#333')
     )
-    
-    digits_display = [
-        html.Span(str(d), style={'color': '#ff0000' if d>=8 else '#00ff00' if d<=2 else '#888', 'padding': '0 8px', 'fontWeight': 'bold'})
-        for d in list(data_store['digits'])
-    ]
-    
-    stats = f"Current RSI: {data_store['rsi']} | Wins: {data_store['wins']} / Losses: {data_store['losses']}"
 
-    return {'data': [trace], 'layout': layout}, data_store['balance'], data_store['status'], digits_display, stats
+    # 2. Frequency Chart (The "Green/Red" Analysis)
+    stats = data_store['digit_stats']
+    # Color logic: Green for highest, Red for lowest, Blue for others
+    if stats:
+        max_freq = max(stats.values())
+        min_freq = min(stats.values()) if len(stats) > 1 else 0
+        colors = []
+        for i in range(10):
+            val = stats.get(i, 0)
+            if val == max_freq: colors.append('#00ff00') # Green
+            elif val == min_freq: colors.append('#ff0000') # Red
+            else: colors.append('#00ccff') # Blue
+    else:
+        colors = ['#333'] * 10
+
+    trace_freq = go.Bar(
+        x=[str(i) for i in range(10)],
+        y=[stats.get(i, 0) for i in range(10)],
+        marker=dict(color=colors)
+    )
+    layout_freq = go.Layout(
+        title="Live Digit Frequency (%)",
+        plot_bgcolor='#111', paper_bgcolor='#000',
+        font=dict(color='#fff'), margin=dict(l=30, r=20, t=30, b=20),
+        yaxis=dict(showgrid=True, gridcolor='#333', title="%")
+    )
+
+    # 3. Last Digits Stream
+    last_15 = list(data_store['digits'])[-15:]
+    digits_display = [
+        html.Span(str(d), style={
+            'color': '#ff0000' if d>=8 else '#00ff00' if d<=2 else '#fff', 
+            'padding': '0 8px'
+        }) for d in last_15
+    ]
+
+    return {'data': [trace_price], 'layout': layout_price}, \
+           {'data': [trace_freq], 'layout': layout_freq}, \
+           data_store['balance'], \
+           data_store['status'], \
+           digits_display
 
 def start_loop(loop):
     asyncio.set_event_loop(loop)

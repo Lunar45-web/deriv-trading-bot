@@ -20,10 +20,11 @@ data_store = {
     'digits': deque(maxlen=15),
     'balance': "Waiting...",
     'status': "Initializing...",
-    'trades': [], # List of trade results
+    'trades': [], 
     'wins': 0,
     'losses': 0,
-    'tick_list': [] # For strategy calculation
+    'tick_list': [],
+    'is_trading': False  # New Safety Lock
 }
 
 # --- DASHBOARD SETUP ---
@@ -32,14 +33,12 @@ server = app.server
 
 app.layout = html.Div(style={'backgroundColor': '#0a0a0a', 'color': '#e0e0e0', 'fontFamily': 'monospace', 'padding': '20px'}, children=[
     
-    # Header & Balance
     html.Div([
-        html.H2("DERIV SNIPER COMMAND", style={'color': '#00ffcc', 'marginBottom': '5px'}),
+        html.H2("DERIV SNIPER COMMAND (DUAL-CORE)", style={'color': '#00ffcc', 'marginBottom': '5px'}),
         html.H3(id='live-balance', children="Balance: Loading...", style={'color': '#fff', 'fontWeight': 'bold'}),
         html.Div(id='live-status', children="Status: Connecting...", style={'color': '#ffa500', 'marginBottom': '10px'}),
     ], style={'textAlign': 'center', 'borderBottom': '1px solid #333', 'paddingBottom': '10px'}),
 
-    # Controls & Stats
     html.Div([
         html.Div([
             html.Label("Target Market:"),
@@ -47,8 +46,7 @@ app.layout = html.Div(style={'backgroundColor': '#0a0a0a', 'color': '#e0e0e0', '
                 id='symbol-selector',
                 options=[
                     {'label': 'Volatility 100 (1s)', 'value': 'R_100'},
-                    {'label': 'Volatility 75 (1s)', 'value': '1HZ75V'},
-                    {'label': 'Volatility 10 (1s)', 'value': '1HZ10V'},
+                    {'label': 'Volatility 100 Index', 'value': 'R_100'}, 
                 ],
                 value='R_100',
                 clearable=False,
@@ -59,31 +57,26 @@ app.layout = html.Div(style={'backgroundColor': '#0a0a0a', 'color': '#e0e0e0', '
         html.Div(id='stats-panel', style={'display': 'inline-block', 'fontSize': '18px'})
     ], style={'padding': '20px', 'textAlign': 'center'}),
 
-    # Live Chart
     dcc.Graph(id='live-chart', animate=False),
 
-    # Last Digits Stream
     html.Div([
         html.H4("Last 15 Digits (Live):"),
         html.Div(id='last-digits', style={'fontSize': '24px', 'letterSpacing': '8px', 'color': '#00ffcc'})
     ], style={'textAlign': 'center', 'marginTop': '20px', 'padding': '10px', 'backgroundColor': '#1a1a1a'}),
     
-    # 1-Second Interval for Updates
     dcc.Interval(id='graph-update', interval=1000, n_intervals=0)
 ])
 
 # --- TRADING ENGINE ---
 async def place_trade(api, contract_type, barrier, amount, prediction):
-    """
-    Fixed Trading Function with Correct Parameters
-    """
     global data_store
     
     try:
         print(f"--- EXECUTING: {prediction} ---", flush=True)
         data_store['status'] = f"EXECUTING: {prediction}..."
+        data_store['is_trading'] = True # Lock
         
-        # 1. Proposal (Get Quote)
+        # 1. Proposal
         proposal = await api.proposal({
             "proposal": 1,
             "amount": amount,
@@ -98,16 +91,14 @@ async def place_trade(api, contract_type, barrier, amount, prediction):
         
         proposal_id = proposal['proposal']['id']
         
-        # 2. Buy (Execute)
+        # 2. Buy
         buy = await api.buy({"buy": proposal_id, "price": amount})
-        
         contract_id = buy['buy']['contract_id']
         data_store['status'] = f"Trade Placed! ID: {contract_id}"
         
-        # 3. Wait for Result
+        # 3. Wait & Check
         await asyncio.sleep(2.5) 
         
-        # Check Profit
         profit_table = await api.profit_table({"description": 1, "limit": 1})
         if profit_table['profit_table']['transactions']:
             latest = profit_table['profit_table']['transactions'][0]
@@ -119,10 +110,14 @@ async def place_trade(api, contract_type, barrier, amount, prediction):
                 else:
                     data_store['losses'] += 1
                     data_store['status'] = f"❌ LOSS (-${amount})"
+        
+        # Unlock immediately after result
+        data_store['is_trading'] = False
 
     except Exception as e:
         print(f"Trade Failed: {e}", flush=True)
         data_store['status'] = f"Error: {str(e)}"
+        data_store['is_trading'] = False # Unlock on error
 
 def process_tick(tick, api, loop):
     global data_store
@@ -138,25 +133,38 @@ def process_tick(tick, api, loop):
         data_store['prices'].append(quote)
         data_store['digits'].append(last_digit)
         
-        # --- STRATEGY ---
+        # Safety: Don't analyze if already trading
+        if data_store['is_trading']:
+            return
+
+        # --- STRATEGY ENGINE ---
         tick_list = data_store['tick_list']
         tick_list.append(quote)
         if len(tick_list) > 5:
             tick_list.pop(0)
 
-        # Flat Market Logic
+        # 1. STRATEGY A: "Flat Market Trap" (Over 2)
         if len(tick_list) == 5:
             volatility = max(tick_list) - min(tick_list)
-            
-            # Condition: Super Flat (<0.3) AND Low Digit (<=1)
+            # Volatility < 0.3 means price is barely moving
             if volatility < 0.3 and last_digit <= 1:
-                
-                # --- UDPATE: SET STAKE TO 5 USD ---
-                STAKE_AMOUNT = 5 
-                
-                # Trigger Async Trade safely
                 asyncio.run_coroutine_threadsafe(
-                    place_trade(api, "DIGITOVER", "2", STAKE_AMOUNT, "Over 2"),
+                    place_trade(api, "DIGITOVER", "2", 5, "Over 2 (Flat Trap)"),
+                    loop
+                )
+                return 
+
+        # 2. STRATEGY B: "High Reversal" (Under 7)
+        # Logic: If we see TWO high digits in a row, bet on the crash.
+        # We need at least 2 digits in history
+        if len(data_store['digits']) >= 2:
+            current_d = data_store['digits'][-1]
+            prev_d = data_store['digits'][-2]
+            
+            # If current is 8 or 9 AND previous was also >= 7
+            if current_d >= 8 and prev_d >= 7:
+                 asyncio.run_coroutine_threadsafe(
+                    place_trade(api, "DIGITUNDER", "7", 5, "Under 7 (Reversal)"),
                     loop
                 )
 
@@ -173,14 +181,12 @@ async def run_trader():
         data_store['status'] = "Connected & Scanning..."
         print(f"Logged in: {auth['authorize']['loginid']}", flush=True)
         
-        # Initial Subscription
         current_symbol = data_store['symbol']
         source_ticks = await api.subscribe({'ticks': current_symbol})
         
         loop = asyncio.get_running_loop()
         source_ticks.subscribe(lambda tick: process_tick(tick, api, loop))
 
-        # Heartbeat Loop (Checks Balance)
         while True:
             bal = await api.balance()
             data_store['balance'] = f"Account: {auth['authorize']['loginid']} | ${bal['balance']['balance']}"
@@ -202,7 +208,6 @@ async def run_trader():
 )
 def update_dashboard(n, selected_symbol):
     
-    # 1. Chart
     trace = go.Scatter(
         x=list(data_store['times']),
         y=list(data_store['prices']),
@@ -220,13 +225,11 @@ def update_dashboard(n, selected_symbol):
         yaxis=dict(gridcolor='#333')
     )
 
-    # 2. Digits
     digits_display = [
         html.Span(str(d), style={'color': '#ff3333' if d>=7 else '#33ff33' if d<=2 else '#fff', 'padding': '0 5px'})
         for d in list(data_store['digits'])
     ]
     
-    # 3. Stats
     stats_text = f"Wins: {data_store['wins']} | Losses: {data_store['losses']}"
 
     return {'data': [trace], 'layout': layout}, \
@@ -235,7 +238,6 @@ def update_dashboard(n, selected_symbol):
            digits_display, \
            stats_text
 
-# --- RUNNER ---
 def start_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_until_complete(run_trader())

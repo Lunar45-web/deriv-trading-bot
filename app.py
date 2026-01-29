@@ -4,8 +4,8 @@ import threading
 import plotly.graph_objs as go
 from collections import deque
 from datetime import datetime
-from dash import Dash, dcc, html, dash_table
-from dash.dependencies import Input, Output, State
+from dash import Dash, dcc, html
+from dash.dependencies import Input, Output
 from deriv_api import DerivAPI
 
 # --- CONFIGURATION ---
@@ -105,12 +105,9 @@ async def place_trade(api, contract_type, barrier, amount, prediction):
         data_store['status'] = f"Trade Placed! ID: {contract_id}"
         
         # 3. Wait for Result
-        # We assume result comes in quickly. For robust logic, we'd use a transaction stream.
-        # Here we just sleep briefly then check profit.
         await asyncio.sleep(2.5) 
         
         # Check Profit
-        # This is a simplified check. Ideally, subscribe to 'proposal_open_contract'
         profit_table = await api.profit_table({"description": 1, "limit": 1})
         if profit_table['profit_table']['transactions']:
             latest = profit_table['profit_table']['transactions'][0]
@@ -152,11 +149,14 @@ def process_tick(tick, api, loop):
             volatility = max(tick_list) - min(tick_list)
             
             # Condition: Super Flat (<0.3) AND Low Digit (<=1)
-            # Tweaked to be more aggressive for testing
             if volatility < 0.3 and last_digit <= 1:
+                
+                # --- UDPATE: SET STAKE TO 5 USD ---
+                STAKE_AMOUNT = 5 
+                
                 # Trigger Async Trade safely
                 asyncio.run_coroutine_threadsafe(
-                    place_trade(api, "DIGITOVER", "2", 0.35, "Over 2"),
+                    place_trade(api, "DIGITOVER", "2", STAKE_AMOUNT, "Over 2"),
                     loop
                 )
 
@@ -180,17 +180,11 @@ async def run_trader():
         loop = asyncio.get_running_loop()
         source_ticks.subscribe(lambda tick: process_tick(tick, api, loop))
 
-        # Heartbeat Loop (Checks Balance & Symbol Changes)
+        # Heartbeat Loop (Checks Balance)
         while True:
-            # 1. Update Balance
             bal = await api.balance()
             data_store['balance'] = f"Account: {auth['authorize']['loginid']} | ${bal['balance']['balance']}"
-            
-            # 2. Check for Symbol Change (Basic Implementation)
-            # If user changed dropdown, we would need to unsubscribe/resubscribe here.
-            # For stability, we stick to the initial symbol in this V1 fix.
-            
-            await asyncio.sleep(5) # Update balance every 5s
+            await asyncio.sleep(5) 
 
     except Exception as e:
         data_store['status'] = f"Connection Error: {e}"
@@ -204,11 +198,9 @@ async def run_trader():
      Output('last-digits', 'children'),
      Output('stats-panel', 'children')],
     [Input('graph-update', 'n_intervals'),
-     Input('symbol-selector', 'value')] # Listener for dropdown
+     Input('symbol-selector', 'value')] 
 )
 def update_dashboard(n, selected_symbol):
-    # Note: Switching symbols live requires complex logic. 
-    # For now, we just update the UI logic, but the bot trades the initial symbol.
     
     # 1. Chart
     trace = go.Scatter(

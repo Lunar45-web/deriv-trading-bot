@@ -1,152 +1,181 @@
 import asyncio
 import os
 import threading
-from flask import Flask
+import pandas as pd
+import pandas_ta as ta
+import plotly.graph_objs as go
+from collections import deque
+from datetime import datetime
+from dash import Dash, dcc, html
+from dash.dependencies import Input, Output
 from deriv_api import DerivAPI
-from deriv_api.errors import APIError
 
 # --- CONFIGURATION ---
-# We try to get the token from Render Environment variables first.
-# If not found, we fall back to your demo token.
-API_TOKEN = os.getenv('DERIV_API_TOKEN', 's4TVgxiEc36iXSM') 
+API_TOKEN = os.getenv('DERIV_API_TOKEN', 's4TVgxiEc36iXSM')
 APP_ID = 1089
-SYMBOL = 'R_100'  # Volatility 100 (1s) - Very fast market
-BASE_STAKE = 0.35
-MARTINGALE_MULTIPLIER = 2.1  # Slightly over 2x to cover potential spread/losses
-MAX_LOSS_STREAK = 4
+SYMBOL = 'R_100'  # Volatility 100 (1s)
+TIMEFRAME = 60    # 1 Minute Candles for MACD analysis
 
-# --- GLOBAL VARIABLES ---
-tick_history = []
-current_loss_streak = 0
-is_trading = False
+# --- GLOBAL DATA STORE ---
+# We use deques (efficient lists) to store live data for the dashboard
+data_store = {
+    'times': deque(maxlen=100),
+    'prices': deque(maxlen=100),
+    'digits': deque(maxlen=20),
+    'balance': "Waiting...",
+    'status': "Initializing...",
+    'trades': []  # Stores trade markers: {'time': t, 'price': p, 'type': 'CALL/PUT'}
+}
 
-# --- FLASK SERVER (TO KEEP RENDER HAPPY) ---
-app = Flask(__name__)
+# --- DASHBOARD SETUP ---
+app = Dash(__name__)
+server = app.server  # For Render to hook into
 
-@app.route('/')
-def home():
-    return "Deriv Sniper Bot is Running..."
-
-def run_web_server():
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
-
-# --- TRADING BOT LOGIC ---
-async def execute_trade(api, contract_type, barrier, prediction_name):
-    global current_loss_streak, is_trading
-
-    is_trading = True
+app.layout = html.Div(style={'backgroundColor': '#111', 'color': '#fff', 'fontFamily': 'sans-serif', 'padding': '20px'}, children=[
+    html.H2("Deriv Live Algo-Trader", style={'textAlign': 'center', 'color': '#00d4ff'}),
     
-    # Calculate Stake
-    stake = BASE_STAKE
-    if current_loss_streak > 0:
-        stake = round(BASE_STAKE * (MARTINGALE_MULTIPLIER ** current_loss_streak), 2)
+    html.Div([
+        html.H4(id='live-balance', children="Balance: Loading..."),
+        html.P(id='live-status', children="Status: Connecting...", style={'color': '#ffa500'}),
+        html.Div(id='last-digits', style={'fontSize': '20px', 'letterSpacing': '5px', 'margin': '10px 0'})
+    ], style={'textAlign': 'center', 'border': '1px solid #333', 'padding': '10px', 'borderRadius': '5px'}),
 
-    print(f"\n>>> SNIPER SHOT: {prediction_name} | Stake: ${stake} | Barrier: {barrier}")
+    dcc.Graph(id='live-chart', animate=False),
+    
+    # Update the chart every 2 seconds
+    dcc.Interval(id='graph-update', interval=2000, n_intervals=0)
+])
+
+# --- TRADING LOGIC & DATA STREAM ---
+async def run_trader():
+    global data_store
+    api = DerivAPI(app_id=APP_ID)
 
     try:
-        # Buy Contract
-        proposal = await api.buy({
-            "buy": 1,
-            "price": stake,
-            "parameters": {
-                "contract_type": contract_type,
-                "symbol": SYMBOL,
-                "duration": 1,
-                "duration_unit": "t",
-                "basis": "stake",
-                "currency": "USD",
-                "barrier": str(barrier)
-            }
-        })
+        # 1. Authorize
+        auth = await api.authorize(API_TOKEN)
+        data_store['balance'] = f"Demo Balance: ${auth['authorize']['balance']}"
+        data_store['status'] = f"Connected to: {auth['authorize']['loginid']}"
+        print(f"Logged in: {auth['authorize']['loginid']}")
 
-        contract_id = proposal['buy']['contract_id']
+        # 2. Subscribe to Ticks (for digits) AND Candles (for MACD)
+        # Note: For simplicity in this 'Lite' version, we build candles from ticks manually 
+        # or just use ticks for the chart to ensure speed.
+        source_ticks = await api.subscribe({'ticks': SYMBOL})
         
-        # Wait for result
-        # We perform a simple loop to check status
-        while True:
-            history = await api.profit_table({"description": 1, "limit": 1})
-            # Check if our specific contract is in the latest history
-            if history['profit_table']['transactions']:
-                latest = history['profit_table']['transactions'][0]
-                if latest['contract_id'] == contract_id:
-                    # Trade Finished
-                    profit = float(latest['sell_price']) - float(latest['buy_price'])
-                    
-                    if profit > 0:
-                        print(f"✅ WIN! Profit: ${profit}")
-                        current_loss_streak = 0
-                    else:
-                        print(f"❌ LOSS. Loss: ${stake}")
-                        current_loss_streak += 1
-                        if current_loss_streak >= MAX_LOSS_STREAK:
-                            print("⚠️ Max Loss Streak Reached. Resetting Stake.")
-                            current_loss_streak = 0
-                    break
+        # 3. Main Loop
+        tick_list = [] # Temporary list to build our analysis
+        
+        async for tick in source_ticks:
+            quote = float(tick['tick']['quote'])
+            epoch = int(tick['tick']['epoch'])
+            last_digit = int(str(tick['tick']['quote'])[-1])
             
-            await asyncio.sleep(1)
+            # Update Dashboard Data
+            dt_object = datetime.fromtimestamp(epoch)
+            data_store['times'].append(dt_object)
+            data_store['prices'].append(quote)
+            data_store['digits'].append(last_digit)
+            
+            # --- STRATEGY: "The Flat Market Trap" ---
+            # We look for low volatility (flat line) then snipe
+            tick_list.append(quote)
+            if len(tick_list) > 5:
+                tick_list.pop(0)
+            
+            # Calculate simple volatility (High - Low of last 5 ticks)
+            if len(tick_list) == 5:
+                volatility = max(tick_list) - min(tick_list)
+                
+                # If market is VERY flat (diff < 0.5) AND last digit is small
+                if volatility < 0.5 and last_digit <= 2:
+                    data_store['status'] = "SIGNAL: Flat Market! Buying Over 2..."
+                    
+                    # PLACING THE TRADE
+                    try:
+                        # Trade: Over 2
+                        await api.buy({
+                            "buy": 1, "price": 0.35,
+                            "parameters": {
+                                "contract_type": "DIGITOVER", "symbol": SYMBOL,
+                                "duration": 1, "duration_unit": "t",
+                                "barrier": "2", "currency": "USD", "basis": "stake"
+                            }
+                        })
+                        # Log the trade for the chart
+                        data_store['trades'].append({'time': dt_object, 'price': quote, 'type': 'UP'})
+                        data_store['status'] = "Trade Placed: Over 2"
+                        
+                        # Update balance after a brief pause
+                        await asyncio.sleep(2)
+                        bal = await api.balance()
+                        data_store['balance'] = f"Balance: ${bal['balance']['balance']}"
+                        
+                    except Exception as e:
+                        data_store['status'] = f"Error: {str(e)}"
 
     except Exception as e:
-        print(f"Error executing trade: {e}")
+        data_store['status'] = f"CRITICAL ERROR: {str(e)}"
+        print(f"Error: {e}")
+
+# --- DASHBOARD CALLBACKS (The Visuals) ---
+@app.callback(
+    [Output('live-chart', 'figure'),
+     Output('live-balance', 'children'),
+     Output('live-status', 'children'),
+     Output('last-digits', 'children')],
+    [Input('graph-update', 'n_intervals')]
+)
+def update_graph_scatter(n):
+    # 1. Create the Price Line
+    trace_price = go.Scatter(
+        x=list(data_store['times']),
+        y=list(data_store['prices']),
+        mode='lines+markers',
+        name='Price',
+        line=dict(color='#00d4ff', width=2)
+    )
     
-    is_trading = False
-
-async def run_bot():
-    global tick_history, is_trading
-
-    print("Connecting to Deriv API...")
-    api = DerivAPI(app_id=APP_ID)
+    # 2. Add Trade Markers (Green Triangles for Buys)
+    trade_times = [t['time'] for t in data_store['trades']]
+    trade_prices = [t['price'] for t in data_store['trades']]
     
-    try:
-        authorize = await api.authorize(API_TOKEN)
-        print(f"Logged in as: {authorize['authorize']['email']}")
-    except APIError as e:
-        print(f"Login Failed: {e}")
-        return
+    trace_trades = go.Scatter(
+        x=trade_times,
+        y=trade_prices,
+        mode='markers',
+        name='Trade Entry',
+        marker=dict(color='#00ff00', symbol='triangle-up', size=15)
+    )
 
-    # Subscribe to Ticks
-    source_ticks = await api.subscribe({'ticks': SYMBOL})
+    layout = go.Layout(
+        plot_bgcolor='#111',
+        paper_bgcolor='#111',
+        font=dict(color='#fff'),
+        xaxis=dict(showgrid=False),
+        yaxis=dict(showgrid=True, gridcolor='#333'),
+        margin=dict(l=40, r=20, t=30, b=30)
+    )
     
-    print(f"Subscribed to {SYMBOL}. Waiting for patterns...")
+    # Format Digits String
+    digits_str = " ".join([str(d) for d in list(data_store['digits'])])
+    
+    return {'data': [trace_price, trace_trades], 'layout': layout}, \
+           data_store['balance'], \
+           data_store['status'], \
+           f"Digits: {digits_str}"
 
-    # Process stream
-    async for tick in source_ticks:
-        # 1. Update History
-        quote = tick['tick']['quote']
-        last_digit = int(str(quote)[-1])
-        tick_history.append(last_digit)
-        
-        if len(tick_history) > 10:
-            tick_history.pop(0)
-            
-        print(f"Digit: {last_digit} | Hist: {tick_history[-5:]}", end="\r")
+# --- RUNNER ---
+def start_background_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_trader())
 
-        # 2. Skip if already trading or not enough data
-        if is_trading or len(tick_history) < 5:
-            continue
-
-        # --- STRATEGY: UNDER 7 ---
-        # Trigger: If last 3 digits are all >= 7 (Trend High) -> Bet Reversal (Under 7)
-        # We bet that the market cannot sustain high digits forever.
-        if all(d >= 7 for d in tick_history[-3:]):
-            print("\nTrigger: High Cluster Detected (>=7). Firing Under 7...")
-            asyncio.create_task(execute_trade(api, "DIGITUNDER", 7, "Under 7"))
-            continue
-
-        # --- STRATEGY: OVER 2 ---
-        # Trigger: If last 3 digits are all <= 2 (Trend Low) -> Bet Reversal (Over 2)
-        # We bet that the market cannot sustain low digits forever.
-        if all(d <= 2 for d in tick_history[-3:]):
-            print("\nTrigger: Low Cluster Detected (<=2). Firing Over 2...")
-            # Note: For 'Over 2', we typically use DIGITOVER with barrier 2
-            asyncio.create_task(execute_trade(api, "DIGITOVER", 2, "Over 2"))
-            continue
-
-if __name__ == "__main__":
-    # Start the Dummy Web Server in a separate thread
-    t = threading.Thread(target=run_web_server)
+if __name__ == '__main__':
+    # Start the Trading Bot in a Background Thread
+    new_loop = asyncio.new_event_loop()
+    t = threading.Thread(target=start_background_loop, args=(new_loop,))
+    t.daemon = True
     t.start()
-
-    # Start the Trading Bot in the main Asyncio loop
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_bot())
+    
+    # Start the Dashboard (Blocking)
+    app.run_server(host='0.0.0.0', port=8050, debug=False)

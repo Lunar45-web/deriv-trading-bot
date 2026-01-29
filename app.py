@@ -19,10 +19,10 @@ BASE_STAKE = 2.0
 RECOVERY_MULTIPLIER = 3.0 # 3x for 40% payout recovery
 MAX_RECOVERY_ATTEMPTS = 1
 
-# --- MATH CONSTANTS ---
+# --- MATH CONSTANTS (CALIBRATED) ---
 MIN_SAMPLE = 60
 COOLDOWN_TICKS = 5
-ENTROPY_THRESHOLD = 2.1 
+ENTROPY_THRESHOLD = 3.15 # Relaxed: Allows trading when Entropy is ~3.1
 
 # --- GLOBALS ---
 last_trade_tick = 0
@@ -50,7 +50,7 @@ server = app.server
 app.layout = html.Div(style={'backgroundColor': '#0b0c10', 'color': '#c5c6c7', 'fontFamily': 'monospace', 'padding': '20px'}, children=[
     
     html.Div([
-        html.H2("DERIV ENTROPY MATH-BOT", style={'color': '#66fcf1', 'letterSpacing': '2px'}),
+        html.H2("DERIV ENTROPY MATH-BOT (CALIBRATED)", style={'color': '#66fcf1', 'letterSpacing': '2px'}),
         html.H3(id='live-balance', children="Balance: Loading...", style={'color': '#fff'}),
         html.Div(id='live-status', children="Status: Calibrating...", style={'color': '#45a29e', 'fontSize': '16px'}),
     ], style={'textAlign': 'center', 'borderBottom': '2px solid #1f2833', 'paddingBottom': '15px'}),
@@ -173,21 +173,21 @@ def process_tick(tick, api, loop):
         recent = list(data_store['digits'])[-2:]
 
         # -------- UNDER 7 LOGIC --------
-        # If High Digits are dominating (>45%) AND we hit an 8 or 9
-        if high_bias > 45 and recent[-1] >= 8:
+        # Trigger: High Bias (>35%) + Last digit 8 or 9
+        if high_bias > 35 and recent[-1] >= 8:
             last_trade_tick = tick_counter
             asyncio.run_coroutine_threadsafe(
-                place_trade(api, "DIGITUNDER", "7", "Under 7 (High Distortion)"),
+                place_trade(api, "DIGITUNDER", "7", "Under 7 (Bias Detected)"),
                 loop
             )
             return
 
         # -------- OVER 2 LOGIC --------
-        # If Low Digits are dominating (>45%) AND we hit a 0 or 1
-        if low_bias > 45 and recent[-1] <= 1:
+        # Trigger: Low Bias (>35%) + Last digit 0 or 1
+        if low_bias > 35 and recent[-1] <= 1:
             last_trade_tick = tick_counter
             asyncio.run_coroutine_threadsafe(
-                place_trade(api, "DIGITOVER", "2", "Over 2 (Low Distortion)"),
+                place_trade(api, "DIGITOVER", "2", "Over 2 (Bias Detected)"),
                 loop
             )
 

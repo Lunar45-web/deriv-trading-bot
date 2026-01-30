@@ -10,26 +10,26 @@ from deriv_api import DerivAPI
 
 # --- CONFIGURATION (DEFAULTS) ---
 DEFAULT_TOKEN_DEMO = os.getenv('DERIV_TOKEN_DEMO', 's4TVgxiEc36iXSM') 
-DEFAULT_TOKEN_REAL = os.getenv('DERIV_TOKEN_REAL', '') # Enter your Real Token here if safe
+DEFAULT_TOKEN_REAL = os.getenv('DERIV_TOKEN_REAL', '') 
 APP_ID = 1089
 
 # --- GLOBAL DATA STORE ---
 data_store = {
-    # Market Data
-    'symbol': 'R_100', # Default
-    'times': deque(maxlen=100),
-    'prices': deque(maxlen=100),
-    'digits': deque(maxlen=100),
+    # Market Data (FIXED: 1009 Ticks to match Deriv Algorithm)
+    'symbol': 'R_100', 
+    'times': deque(maxlen=1009),
+    'prices': deque(maxlen=1009),
+    'digits': deque(maxlen=1009), 
     
     # Trading State
     'balance': "Waiting...",
-    'status': "Ready to Start",
-    'active': False, # Start/Stop Switch
-    'account_type': 'demo', # 'demo' or 'real'
+    'status': "Initializing Data...",
+    'active': False, 
+    'account_type': 'demo', 
     
     # Logic Memory
     'digit_stats': {i: 0 for i in range(10)},
-    'prev_stats': {i: 0 for i in range(10)}, # To check if increasing/decreasing
+    'digit_counts': {i: 0 for i in range(10)},
     
     # Performance
     'initial_balance': 0.0,
@@ -37,9 +37,9 @@ data_store = {
     'wins': 0,
     'losses': 0,
     'consecutive_losses': 0,
-    'is_trading': False, # Execution Lock
+    'is_trading': False, 
     
-    # Settings (Updated from UI)
+    # Settings 
     'stake': 2.0,
     'target': 20.0,
     'stop_loss': 50.0,
@@ -51,12 +51,12 @@ data_store = {
 app = Dash(__name__)
 server = app.server
 
-app.layout = html.Div(style={'backgroundColor': '#121212', 'color': '#e0e0e0', 'fontFamily': 'Roboto, sans-serif', 'height': '100vh', 'overflow': 'hidden'}, children=[
+app.layout = html.Div(style={'backgroundColor': '#121212', 'color': '#e0e0e0', 'fontFamily': 'Roboto, sans-serif', 'minHeight': '100vh'}, children=[
     
-    # --- TOP BAR (HEADER & STATUS) ---
+    # --- TOP BAR ---
     html.Div([
         html.Div([
-            html.H2("DERIV MASTER TERMINAL", style={'color': '#00ff88', 'margin': '0', 'fontSize': '24px'}),
+            html.H2("DERIV MASTER TERMINAL (1000 TICK SYNC)", style={'color': '#00ff88', 'margin': '0', 'fontSize': '24px'}),
             html.H4("ALGORITHMIC TRADING SUITE", style={'color': '#888', 'margin': '0', 'fontSize': '12px', 'letterSpacing': '2px'})
         ], style={'flex': '1'}),
         
@@ -114,38 +114,38 @@ app.layout = html.Div(style={'backgroundColor': '#121212', 'color': '#e0e0e0', '
                 dcc.Input(id='stop-input', type='number', value=50.0, style={'width': '60px', 'marginLeft': '10px'}),
             ], style={'marginBottom': '20px'}),
 
-            html.Label("STRATEGY MODE", style={'color': '#888', 'fontSize': '12px', 'fontWeight': 'bold'}),
-            html.Div("Strategy: 'Weak Lows / Strong Highs' (Over 2)", style={'fontSize': '12px', 'color': '#00ccff', 'marginBottom': '20px'}),
-
             html.Button('START BOT', id='btn-start', n_clicks=0, style={'width': '100%', 'padding': '15px', 'backgroundColor': '#00ff88', 'border': 'none', 'color': '#000', 'fontWeight': 'bold', 'cursor': 'pointer', 'marginBottom': '10px'}),
             html.Button('STOP BOT', id='btn-stop', n_clicks=0, style={'width': '100%', 'padding': '15px', 'backgroundColor': '#ff3333', 'border': 'none', 'color': '#fff', 'fontWeight': 'bold', 'cursor': 'pointer'}),
 
             html.Div(id='control-feedback', style={'marginTop': '10px', 'color': '#ffff00', 'fontSize': '12px'})
 
-        ], style={'width': '25%', 'padding': '20px', 'backgroundColor': '#1a1a1a', 'overflowY': 'auto'}),
+        ], style={'width': '25%', 'padding': '20px', 'backgroundColor': '#1a1a1a', 'overflowY': 'auto', 'height': 'calc(100vh - 80px)'}),
 
-        # --- MAIN DISPLAY (CHARTS) ---
+        # --- MAIN DISPLAY (VISUAL ANALYTICS) ---
         html.Div([
             # Status Bar
             html.Div(id='main-status', children="Status: Idle", style={'padding': '10px', 'backgroundColor': '#222', 'color': '#ffa500', 'textAlign': 'center', 'fontWeight': 'bold', 'marginBottom': '10px'}),
 
-            # Digit Frequency Chart (The "Deriv" Analysis)
-            html.Div([
-                dcc.Graph(id='freq-chart', config={'displayModeBar': False}, style={'height': '300px'})
-            ], style={'marginBottom': '20px', 'border': '1px solid #333', 'padding': '10px'}),
+            # 1. DERIV-STYLE CIRCLES
+            html.H4("LIVE DIGIT ANALYSIS (Last 1000 Ticks)", style={'color': '#fff', 'textAlign': 'center'}),
+            html.Div(id='deriv-circles', style={'display': 'flex', 'justifyContent': 'center', 'flexWrap': 'wrap', 'margin': '20px 0', 'padding': '10px', 'backgroundColor': '#1a1a1a', 'borderRadius': '10px'}),
+            
+            # 2. EXACT PERCENTAGE TABLE
+            html.Div(id='deriv-percentages-table', style={'backgroundColor': '#1a1a1a', 'padding': '15px', 'borderRadius': '8px', 'marginBottom': '20px'}),
 
-            # Last Digits Stream
+            # 3. TICK COUNTER & DATA SOURCE
             html.Div([
-                html.Label("LIVE DIGIT TICKER", style={'color': '#888', 'fontSize': '12px'}),
-                html.Div(id='last-digits', style={'fontSize': '32px', 'letterSpacing': '10px', 'fontWeight': 'bold', 'textAlign': 'center', 'padding': '15px', 'backgroundColor': '#000', 'border': '1px solid #444'})
-            ]),
+                html.Span("Ticks Analyzed: ", style={'color': '#888'}),
+                html.Span(id='tick-counter', style={'color': '#00ccff', 'fontWeight': 'bold'}),
+                html.Div(id='data-source-info', style={'color': '#888', 'fontSize': '12px', 'marginTop': '5px'})
+            ], style={'textAlign': 'center', 'marginBottom': '10px'}),
 
             # Invisible Interval for Updates
             dcc.Interval(id='ui-update', interval=1000, n_intervals=0)
 
-        ], style={'flex': '1', 'padding': '20px', 'backgroundColor': '#121212'})
+        ], style={'flex': '1', 'padding': '20px', 'backgroundColor': '#121212', 'height': 'calc(100vh - 80px)', 'overflowY': 'auto'})
 
-    ], style={'display': 'flex', 'height': 'calc(100vh - 80px)'})
+    ], style={'display': 'flex'})
 ])
 
 # --- TRADING LOGIC ENGINE ---
@@ -220,50 +220,41 @@ def process_tick(tick, api, loop):
         
         data_store['digits'].append(last_digit)
 
-        # Update Stats (Last 100)
-        if len(data_store['digits']) > 0:
-            counts = Counter(data_store['digits'])
-            total = len(data_store['digits'])
-            # Store current stats
-            current_stats = {i: (counts.get(i, 0) / total) * 100 for i in range(10)}
+        # WAIT FOR 500 TICKS BEFORE ANALYZING
+        if len(data_store['digits']) < 500:
+            data_store['status'] = f"Collecting Data... ({len(data_store['digits'])}/500)"
+            return
+
+        # Update Stats (Last 1000 Ticks)
+        counts = Counter(data_store['digits'])
+        total = len(data_store['digits'])
+        
+        # Store current stats
+        current_stats = {i: (counts.get(i, 0) / total) * 100 for i in range(10)}
+        data_store['digit_stats'] = current_stats
+        data_store['digit_counts'] = counts
+
+        # --- USER STRATEGY LOGIC (OVER 2) ---
+        if data_store['active'] and not data_store['is_trading']:
             
-            # Save previous stats every 5 ticks to check trend
-            if len(data_store['digits']) % 5 == 0:
-                data_store['prev_stats'] = data_store['digit_stats'].copy()
+            # 1. Condition: 0, 1, 2 must all be < 10%
+            low_vals = [current_stats[0], current_stats[1], current_stats[2]]
+            is_weak_lows = all(v < 10.0 for v in low_vals)
             
-            data_store['digit_stats'] = current_stats
+            # 2. Condition: Green Bar (Highest) Logic
+            # Must be 4-9 AND >= 12%
+            max_digit = max(current_stats, key=current_stats.get)
+            max_val = current_stats[max_digit]
+            is_strong_highs = (max_digit >= 4) and (max_val >= 12.0)
+            
+            # 3. Trigger: "Cursor touches 0, 1, or 2"
+            is_trigger_touch = (last_digit <= 2)
 
-            # --- USER STRATEGY LOGIC ---
-            if data_store['active'] and not data_store['is_trading'] and total >= 50:
-                
-                # 1. Check Condition: 0, 1, 2 must all be < 10%
-                low_vals = [current_stats[0], current_stats[1], current_stats[2]]
-                is_weak_lows = all(v < 10.0 for v in low_vals)
-                
-                # 2. Check Condition: Check trends for 0-2 (Should NOT be increasing)
-                # Compare current vs previous
-                is_lows_flat = True
-                for i in [0, 1, 2]:
-                    if current_stats[i] > data_store['prev_stats'][i] + 2.0: # Tolerance of 2%
-                        is_lows_flat = False
-                
-                # 3. Check Condition: Green Bar (Highest) Logic
-                # Must be 4-9 AND >= 12%
-                max_digit = max(current_stats, key=current_stats.get)
-                max_val = current_stats[max_digit]
-                is_strong_highs = (max_digit >= 4) and (max_val >= 12.0)
-                
-                # 4. Trigger: "Cursor touches 0, 1, or 2"
-                is_trigger_touch = (last_digit <= 2)
-
-                # DEBUG STATUS
-                # data_store['status'] = f"Lows:{is_weak_lows} Flat:{is_lows_flat} Highs:{is_strong_highs}"
-
-                if is_weak_lows and is_lows_flat and is_strong_highs and is_trigger_touch:
-                     asyncio.run_coroutine_threadsafe(
-                        execute_trade(api, "DIGITOVER", "Over 2 (Sniper Setup)"),
-                        loop
-                    )
+            if is_weak_lows and is_strong_highs and is_trigger_touch:
+                    asyncio.run_coroutine_threadsafe(
+                    execute_trade(api, "DIGITOVER", "Over 2 (Sniper Setup)"),
+                    loop
+                )
 
     except Exception as e:
         print(f"Tick Error: {e}", flush=True)
@@ -327,8 +318,10 @@ async def run_trader_loop():
     [Output('live-balance', 'children'),
      Output('live-profit', 'children'),
      Output('main-status', 'children'),
-     Output('freq-chart', 'figure'),
-     Output('last-digits', 'children'),
+     Output('deriv-circles', 'children'),
+     Output('deriv-percentages-table', 'children'),
+     Output('tick-counter', 'children'),
+     Output('data-source-info', 'children'),
      Output('control-feedback', 'children')],
     [Input('ui-update', 'n_intervals'),
      Input('btn-start', 'n_clicks'),
@@ -365,41 +358,63 @@ def update_ui(n, btn_start, btn_stop, market, acc_type, stake, target, stop, t_d
     DEFAULT_TOKEN_REAL = t_real
 
     # 3. Profit Calc
-    profit_color = '#00ff00' if data_store['current_profit'] >= 0 else '#ff0000'
     profit_text = f"Session Profit: ${data_store['current_profit']:.2f}"
 
-    # 4. Frequency Chart (Green/Red Logic)
-    stats = data_store['digit_stats']
-    colors = ['#444'] * 10
-    if stats:
-        max_val = max(stats.values())
-        min_val = min(stats.values())
-        for i in range(10):
-            if stats[i] == max_val: colors[i] = '#00ff00' # Green
-            elif stats[i] == min_val: colors[i] = '#ff0000' # Red
-            elif i <= 2: colors[i] = '#ffff00' # Highlight 0-2 (Yellow)
+    # 4. CREATE DERIV CIRCLES
+    stats = data_store.get('digit_stats', {})
+    total_ticks = len(data_store.get('digits', []))
+    
+    circles = []
+    for digit in range(10):
+        percentage = stats.get(digit, 0)
+        
+        # Circle Color Logic (Matches Deriv)
+        if digit <= 2: # 0,1,2 = Yellow (Low Risk Zone)
+            color = '#ffff00'
+            text_color = '#000'
+        elif percentage >= 12: # High % = Green
+            color = '#00ff00'
+            text_color = '#000'
+        elif percentage <= 8: # Low % = Red
+            color = '#ff0000'
+            text_color = '#fff'
+        else: # Normal = Blue
+            color = '#4444ff'
+            text_color = '#fff'
+        
+        # Size based on percentage
+        circle_size = 40 + (percentage * 2)
+        
+        circles.append(html.Div([
+            html.Div(str(digit), style={
+                'width': f'{circle_size}px', 'height': f'{circle_size}px',
+                'backgroundColor': color, 'borderRadius': '50%',
+                'display': 'flex', 'alignItems': 'center', 'justifyContent': 'center',
+                'color': text_color, 'fontWeight': 'bold', 'fontSize': '18px',
+                'margin': '10px', 'boxShadow': '0 0 10px rgba(255,255,255,0.1)'
+            }),
+            html.Div(f"{percentage:.1f}%", style={'textAlign': 'center', 'fontSize': '12px', 'color': '#ccc'})
+        ], style={'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center'}))
 
-    fig = go.Figure(data=[go.Bar(
-        x=[str(i) for i in range(10)],
-        y=[stats.get(i, 0) for i in range(10)],
-        marker_color=colors
-    )])
-    fig.update_layout(
-        plot_bgcolor='#111', paper_bgcolor='#111',
-        font=dict(color='#fff'), margin=dict(l=20, r=20, t=20, b=20),
-        yaxis=dict(range=[0, 30]) # Fixed range for stability
-    )
+    # 5. CREATE TABLE
+    table_rows = []
+    # Header
+    table_rows.append(html.Tr([html.Th("Digit"), html.Th("Count"), html.Th("%")]))
+    for digit in range(10):
+        p = stats.get(digit, 0)
+        c = data_store.get('digit_counts', {}).get(digit, 0)
+        table_rows.append(html.Tr([
+            html.Td(str(digit)), html.Td(str(c)), 
+            html.Td(f"{p:.1f}%", style={'color': '#00ff00' if p>=12 else '#ff0000' if p<=8 else '#fff'})
+        ]))
+    
+    table = html.Table(table_rows, style={'width': '100%', 'color': '#fff'})
 
-    # 5. Last Digits
-    recent = list(data_store['digits'])[-12:]
-    digits_display = [
-        html.Span(str(d), style={'color': '#00ff00' if d>=4 else '#ff0000', 'padding': '0 10px'})
-        for d in recent
-    ]
-
+    # 6. Data Source Info
+    data_source = "⚠️ Building Dataset..." if total_ticks < 500 else "✅ SYNCHRONIZED (1000+ Ticks)"
     feedback = f"Settings Saved. Mode: {acc_type.upper()}"
 
-    return data_store['balance'], profit_text, data_store['status'], fig, digits_display, feedback
+    return data_store['balance'], profit_text, data_store['status'], circles, table, str(total_ticks), data_source, feedback
 
 # --- THREAD START ---
 def start_loop(loop):

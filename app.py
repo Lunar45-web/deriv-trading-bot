@@ -15,7 +15,7 @@ APP_ID = 1089
 
 # --- GLOBAL DATA STORE ---
 data_store = {
-    # Market Data (FIXED: 1009 Ticks to match Deriv Algorithm)
+    # Market Data (1009 Ticks to match Deriv Algorithm)
     'symbol': 'R_100', 
     'times': deque(maxlen=1009),
     'prices': deque(maxlen=1009),
@@ -30,6 +30,7 @@ data_store = {
     # Logic Memory
     'digit_stats': {i: 0 for i in range(10)},
     'digit_counts': {i: 0 for i in range(10)},
+    'prev_stats': {i: 0 for i in range(10)},
     
     # Performance
     'initial_balance': 0.0,
@@ -220,12 +221,7 @@ def process_tick(tick, api, loop):
         
         data_store['digits'].append(last_digit)
 
-        # WAIT FOR 500 TICKS BEFORE ANALYZING
-        if len(data_store['digits']) < 500:
-            data_store['status'] = f"Collecting Data... ({len(data_store['digits'])}/500)"
-            return
-
-        # Update Stats (Last 1000 Ticks)
+        # 1. ALWAYS UPDATE STATS (FIX: Stats update LIVE from Tick 1)
         counts = Counter(data_store['digits'])
         total = len(data_store['digits'])
         
@@ -234,20 +230,29 @@ def process_tick(tick, api, loop):
         data_store['digit_stats'] = current_stats
         data_store['digit_counts'] = counts
 
-        # --- USER STRATEGY LOGIC (OVER 2) ---
+        # Save previous stats every 5 ticks to check trend
+        if len(data_store['digits']) % 5 == 0:
+            data_store['prev_stats'] = data_store['digit_stats'].copy()
+
+        # 2. CHECK WARMUP (Block trading, NOT stats)
+        if total < 500:
+            data_store['status'] = f"Collecting Data... ({total}/500)"
+            return
+
+        # 3. USER STRATEGY LOGIC (OVER 2)
         if data_store['active'] and not data_store['is_trading']:
             
-            # 1. Condition: 0, 1, 2 must all be < 10%
+            # Condition: 0, 1, 2 must all be < 10%
             low_vals = [current_stats[0], current_stats[1], current_stats[2]]
             is_weak_lows = all(v < 10.0 for v in low_vals)
             
-            # 2. Condition: Green Bar (Highest) Logic
+            # Condition: Green Bar (Highest) Logic
             # Must be 4-9 AND >= 12%
             max_digit = max(current_stats, key=current_stats.get)
             max_val = current_stats[max_digit]
             is_strong_highs = (max_digit >= 4) and (max_val >= 12.0)
             
-            # 3. Trigger: "Cursor touches 0, 1, or 2"
+            # Trigger: "Cursor touches 0, 1, or 2"
             is_trigger_touch = (last_digit <= 2)
 
             if is_weak_lows and is_strong_highs and is_trigger_touch:

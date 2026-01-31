@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.graph_objs as go
 from collections import deque, Counter
 from datetime import datetime
-from dash import Dash, dcc, html, Input, Output, State, ctx, dash_table
+from dash import Dash, dcc, html, Input, Output, State, ctx, no_update
 from deriv_api import DerivAPI
 
 # --- CONFIGURATION ---
@@ -17,222 +17,155 @@ APP_ID = 1089
 data_store = {
     'symbol': 'R_100', 
     'times': deque(maxlen=1000),
+    'prices': deque(maxlen=1000),
     'digits': deque(maxlen=1000), 
     
-    'balance': "Waiting...",
-    'status': "Ready...",
-    'active': False, 
-    'account_type': 'demo', 
+    'balance': "Loading...",
+    'status': "Connecting...",
+    'account_type': 'demo',
     
-    # Logic Inspection
+    # Analysis
     'digit_stats': {i: 0 for i in range(10)},
-    'prev_stats': {i: 0 for i in range(10)}, # For Trend Analysis
-    'ranks': {}, # To check "Least" and "2nd Least"
+    'prev_stats': {i: 0 for i in range(10)},
+    'ranks': {},
+    'is_ready': False, # Data Lock
     
-    'logic_state': {
-        'cond_under_10': False,
-        'cond_not_extremes': False,
-        'cond_decreasing': False,
-        'ready': False
-    },
-    
-    'trade_log': deque(maxlen=10),
+    # Trade State
+    'last_trade_result': None,
     'current_profit': 0.0,
-    'consecutive_losses': 0,
-    'is_trading': False, 
-    
-    'stake': 2.0, 'target': 20.0, 'stop_loss': 50.0,
-    'martingale': True, 'martingale_multiplier': 2.5
 }
 
-# --- DASHBOARD ---
+# --- STYLES (DERIV REPLICA) ---
+STYLE_BG = '#ffffff'
+STYLE_TEXT = '#333333'
+STYLE_SIDEBAR = '#f2f3f5'
+STYLE_GREEN = '#008832' # Deriv Green
+STYLE_RED = '#cc0000'   # Deriv Red
+
 app = Dash(__name__)
 server = app.server
 
-app.layout = html.Div(style={'backgroundColor': '#0a0a0a', 'color': '#e0e0e0', 'fontFamily': 'Roboto, monospace', 'minHeight': '100vh'}, children=[
+app.layout = html.Div(style={'backgroundColor': STYLE_BG, 'color': STYLE_TEXT, 'fontFamily': 'Roboto, sans-serif', 'height': '100vh', 'display': 'flex', 'flexDirection': 'column'}, children=[
     
-    # HEADER
+    # --- 1. HEADER (Top Bar) ---
     html.Div([
-        html.H2("DERIV PERFORMANCE MONITOR", style={'color': '#00ff88', 'margin': '0'}),
+        html.Img(src='https://deriv.com/img/deriv-logo.svg', style={'height': '25px', 'marginRight': '20px'}),
+        html.Div("Smart Trader Hub", style={'fontWeight': 'bold', 'fontSize': '16px'}),
         html.Div([
-            html.H3(id='live-balance', children="---", style={'color': '#fff', 'margin': '0'}),
-            html.Div(id='live-profit', children="$0.00", style={'color': '#00ccff', 'fontSize': '16px'})
-        ], style={'textAlign': 'right'})
-    ], style={'display': 'flex', 'justifyContent': 'space-between', 'padding': '15px 20px', 'backgroundColor': '#111', 'borderBottom': '1px solid #333'}),
+            html.Span(id='live-balance', children="---", style={'fontWeight': 'bold', 'marginRight': '20px'}),
+            dcc.Dropdown(id='account-type', options=[{'label': 'Demo Account', 'value': 'demo'}, {'label': 'Real Account', 'value': 'real'}], value='demo', clearable=False, style={'width': '150px', 'display': 'inline-block'})
+        ], style={'marginLeft': 'auto', 'display': 'flex', 'alignItems': 'center'})
+    ], style={'padding': '10px 20px', 'borderBottom': '1px solid #e6e6e6', 'display': 'flex', 'alignItems': 'center', 'backgroundColor': '#fff'}),
 
+    # --- 2. MAIN CONTENT (Split View) ---
     html.Div([
-        # CONTROLS
+        
+        # LEFT: CHART & STATS
         html.Div([
-            html.Label("ACCOUNT", style={'color': '#888', 'fontSize': '10px'}),
-            dcc.RadioItems(id='account-type', options=[{'label': 'DEMO', 'value': 'demo'}, {'label': 'REAL', 'value': 'real'}], value='demo', inline=True, style={'marginBottom': '15px'}),
-            
-            html.Label("TOKENS", style={'color': '#888', 'fontSize': '10px'}),
-            dcc.Input(id='token-demo', placeholder="Demo Token", value=DEFAULT_TOKEN_DEMO, style={'width': '100%', 'marginBottom': '5px', 'backgroundColor': '#222', 'color': '#fff', 'border': 'none'}),
-            dcc.Input(id='token-real', placeholder="Real Token", value=DEFAULT_TOKEN_REAL, style={'width': '100%', 'marginBottom': '15px', 'backgroundColor': '#222', 'color': '#fff', 'border': 'none'}),
+            # Market Selector
+            html.Div([
+                dcc.Dropdown(id='market-selector', options=[
+                    {'label': 'Volatility 10 Index', 'value': '1HZ10V'},
+                    {'label': 'Volatility 100 Index', 'value': 'R_100'}
+                ], value='R_100', clearable=False, style={'width': '250px', 'marginBottom': '10px'})
+            ], style={'position': 'absolute', 'top': '10px', 'left': '20px', 'zIndex': '100'}),
 
-            html.Label("SETTINGS", style={'color': '#888', 'fontSize': '10px'}),
-            html.Div([html.Label("Stake:"), dcc.Input(id='stake-input', type='number', value=2.0, style={'width': '50px', 'float': 'right'})], style={'marginBottom': '5px'}),
-            html.Div([html.Label("Target:"), dcc.Input(id='target-input', type='number', value=20.0, style={'width': '50px', 'float': 'right'})], style={'marginBottom': '5px'}),
-            html.Div([html.Label("Stop Loss:"), dcc.Input(id='stop-input', type='number', value=50.0, style={'width': '50px', 'float': 'right'})], style={'marginBottom': '20px'}),
+            # Main Chart
+            dcc.Graph(id='main-chart', config={'displayModeBar': False}, style={'height': '60vh'}),
 
-            html.Button('START', id='btn-start', style={'width': '100%', 'padding': '12px', 'backgroundColor': '#00ff88', 'border': 'none', 'fontWeight': 'bold', 'cursor': 'pointer', 'marginBottom': '10px'}),
-            html.Button('STOP', id='btn-stop', style={'width': '100%', 'padding': '12px', 'backgroundColor': '#ff3333', 'color': '#fff', 'border': 'none', 'fontWeight': 'bold', 'cursor': 'pointer'}),
+            # BOTTOM: DERIV CIRCLES (The "Worm")
+            html.Div([
+                html.Div("Last Digit Stats (1000 Ticks)", style={'fontSize': '12px', 'color': '#999', 'marginBottom': '5px', 'textAlign': 'center'}),
+                html.Div(id='deriv-circles', style={'display': 'flex', 'justifyContent': 'center', 'padding': '10px'})
+            ], style={'height': '20vh', 'borderTop': '1px solid #e6e6e6', 'backgroundColor': '#fff'})
 
-            html.Div(id='control-feedback', style={'fontSize': '10px', 'color': 'yellow', 'marginTop': '10px'})
+        ], style={'flex': '3', 'position': 'relative', 'borderRight': '1px solid #e6e6e6'}),
 
-        ], style={'width': '220px', 'padding': '20px', 'backgroundColor': '#111'}),
-
-        # MAIN PANEL
+        # RIGHT: TRADE PANEL (Controls)
         html.Div([
+            html.H4("Over/Under", style={'marginTop': '0'}),
             
-            # 1. LOGIC CHECKLIST (Top)
-            html.Div(id='logic-checklist', style={'display': 'flex', 'justifyContent': 'space-around', 'marginBottom': '20px', 'padding': '10px', 'backgroundColor': '#1a1a1a', 'borderRadius': '5px'}),
+            # Logic Status Panel
+            html.Div(id='logic-status-box', style={'padding': '15px', 'backgroundColor': '#e6f7ff', 'borderRadius': '5px', 'marginBottom': '20px', 'border': '1px solid #1890ff', 'fontSize': '13px'}),
 
-            # 2. REAL-TIME DIGIT MONITOR (The Request)
-            html.H4("LIVE DIGIT PERFORMANCE (1000 Ticks)", style={'margin': '0 0 10px 0', 'color': '#ccc', 'fontSize': '14px'}),
-            html.Div(id='performance-table'),
+            # Inputs
+            html.Label("Stake", style={'fontWeight': 'bold', 'fontSize': '12px'}),
+            dcc.Input(id='stake-input', type='number', value=10.0, style={'width': '100%', 'padding': '10px', 'borderRadius': '5px', 'border': '1px solid #ccc', 'marginBottom': '15px'}),
 
-            # 3. STATUS BAR
-            html.Div(id='main-status', children="Status: Idle", style={'margin': '20px 0', 'padding': '15px', 'backgroundColor': '#222', 'color': '#ffa500', 'textAlign': 'center', 'fontWeight': 'bold', 'borderRadius': '5px'}),
+            html.Label("Last Digit Prediction", style={'fontWeight': 'bold', 'fontSize': '12px'}),
+            html.Div([
+                html.Button("Over 2", id='btn-mode-over', style={'flex': '1', 'padding': '10px', 'backgroundColor': '#00a79e', 'color': 'white', 'border': 'none', 'borderRadius': '5px 0 0 5px'}),
+                html.Button("Under 7", id='btn-mode-under', style={'flex': '1', 'padding': '10px', 'backgroundColor': '#eee', 'border': '1px solid #ccc', 'borderRadius': '0 5px 5px 0'})
+            ], style={'display': 'flex', 'marginBottom': '20px'}),
+
+            # SMART ACTION BUTTONS
+            html.Button([
+                html.Div("SMART PURCHASE", style={'fontSize': '14px', 'fontWeight': 'bold'}),
+                html.Div("Checks Logic Before Buying", style={'fontSize': '10px', 'opacity': '0.8'})
+            ], id='btn-buy', style={'width': '100%', 'padding': '15px', 'backgroundColor': STYLE_GREEN, 'color': 'white', 'border': 'none', 'borderRadius': '5px', 'cursor': 'pointer', 'marginBottom': '10px'}),
+
+            html.Div(id='trade-feedback', style={'textAlign': 'center', 'marginTop': '10px', 'fontWeight': 'bold'}),
             
-            # 4. TRADE LOG
-            html.Div(id='trade-log-table'),
+            # Hidden inputs for Tokens
+            dcc.Input(id='token-demo', type='hidden', value=DEFAULT_TOKEN_DEMO),
+            dcc.Input(id='token-real', type='hidden', value=DEFAULT_TOKEN_REAL),
 
-            dcc.Interval(id='ui-update', interval=1000, n_intervals=0)
+        ], style={'flex': '1', 'backgroundColor': STYLE_SIDEBAR, 'padding': '20px'})
 
-        ], style={'flex': '1', 'padding': '20px', 'overflowY': 'auto'})
+    ], style={'flex': '1', 'display': 'flex'}),
 
-    ], style={'display': 'flex', 'height': 'calc(100vh - 60px)'})
+    dcc.Interval(id='ui-update', interval=1000, n_intervals=0)
 ])
 
-# --- TRADING EXECUTION ---
-async def execute_trade(api, contract_type, prediction):
+# --- LOGIC ENGINE ---
+async def check_and_trade(api, contract_type, barrier, stake, mode):
     global data_store
-    if not data_store['active']: return
     
-    # Limits
-    if data_store['current_profit'] >= data_store['target'] or data_store['current_profit'] <= -data_store['stop_loss']:
-        data_store['active'] = False
-        data_store['status'] = "🛑 LIMIT REACHED"
-        return
+    # 1. RUN ANALYSIS
+    stats = data_store['digit_stats']
+    prev = data_store['prev_stats']
+    ranks = data_store['ranks']
+    
+    # Logic: Over 2
+    cond_under_10 = all(stats[i] < 10.0 for i in [0, 1, 2])
+    extremes = [ranks.get('least'), ranks.get('second_least'), ranks.get('most')]
+    cond_not_extremes = (0 not in extremes) and (1 not in extremes) and (2 not in extremes)
+    cond_decreasing = all(stats[i] <= prev[i] for i in [0, 1, 2])
+    
+    is_safe = cond_under_10 and cond_not_extremes and cond_decreasing
+    
+    if not is_safe:
+        reasons = []
+        if not cond_under_10: reasons.append("0,1,2 > 10%")
+        if not cond_not_extremes: reasons.append("0,1,2 is Highest/Lowest")
+        if not cond_decreasing: reasons.append("0,1,2 Rising")
+        return False, f"⛔ UNSAFE: {', '.join(reasons)}"
 
-    stake = data_store['stake']
-    if data_store['martingale'] and data_store['consecutive_losses'] > 0:
-        stake = round(stake * data_store['martingale_multiplier'], 2)
-
+    # 2. EXECUTE IF SAFE
     try:
-        data_store['status'] = f"⚡ FIRING: {prediction} (${stake})"
-        data_store['is_trading'] = True 
-        
-        proposal = await api.proposal({"proposal": 1, "amount": stake, "barrier": "2", "basis": "stake", "contract_type": contract_type, "currency": "USD", "duration": 1, "duration_unit": "t", "symbol": data_store['symbol']})
+        proposal = await api.proposal({"proposal": 1, "amount": stake, "barrier": barrier, "basis": "stake", "contract_type": contract_type, "currency": "USD", "duration": 1, "duration_unit": "t", "symbol": data_store['symbol']})
         buy = await api.buy({"buy": proposal['proposal']['id'], "price": stake})
-        contract_id = buy['buy']['contract_id']
         
-        trade_rec = {'Time': datetime.now().strftime("%H:%M:%S"), 'Stake': stake, 'Result': '...', 'Profit': 0}
-        data_store['trade_log'].appendleft(trade_rec)
-        
-        await asyncio.sleep(2.5) 
-        
-        profit_table = await api.profit_table({"description": 1, "limit": 1})
-        if profit_table['profit_table']['transactions']:
-            latest = profit_table['profit_table']['transactions'][0]
-            if latest['contract_id'] == contract_id:
-                profit = float(latest['sell_price']) - float(latest['buy_price'])
-                data_store['current_profit'] += profit
-                
-                data_store['trade_log'][0]['Result'] = 'WIN' if profit > 0 else 'LOSS'
-                data_store['trade_log'][0]['Profit'] = f"${profit:.2f}"
-                
-                if profit > 0:
-                    data_store['consecutive_losses'] = 0
-                    data_store['status'] = f"✅ WIN (+${profit:.2f})"
-                else:
-                    data_store['consecutive_losses'] += 1
-                    data_store['status'] = f"❌ LOSS (-${stake})"
-        
-        data_store['is_trading'] = False
+        return True, f"✅ BOUGHT {contract_type}! (ID: {buy['buy']['contract_id']})"
     except Exception as e:
-        print(f"Error: {e}")
-        data_store['is_trading'] = False
+        return False, f"Error: {str(e)}"
 
+# --- BACKEND ---
 def update_statistics():
     if len(data_store['digits']) > 0:
         counts = Counter(data_store['digits'])
         total = len(data_store['digits'])
-        
-        # Current Stats
         stats = {i: (counts.get(i, 0) / total) * 100 for i in range(10)}
         
-        # Update Trend Memory every 10 ticks
         if len(data_store['digits']) % 10 == 0:
             data_store['prev_stats'] = data_store['digit_stats'].copy()
-            
+        
         data_store['digit_stats'] = stats
-        
-        # Calculate Ranks (For "Least" and "2nd Least" logic)
-        # Sort digits by percentage (Lowest to Highest)
+        # Rank Logic
         sorted_digits = sorted(stats, key=stats.get)
-        
-        data_store['ranks'] = {
-            'least': sorted_digits[0],       # The absolute lowest
-            'second_least': sorted_digits[1], # The 2nd lowest
-            'most': sorted_digits[-1]        # The highest (Green bar)
-        }
+        data_store['ranks'] = {'least': sorted_digits[0], 'second_least': sorted_digits[1], 'most': sorted_digits[-1]}
 
-def process_tick(tick, api, loop):
-    global data_store
-    try:
-        last_digit = int(str(tick['tick']['quote'])[-1])
-        data_store['digits'].append(last_digit)
-        update_statistics()
-
-        stats = data_store['digit_stats']
-        ranks = data_store['ranks']
-        prev = data_store['prev_stats']
-        
-        # --- THE USER'S STRICT LOGIC ---
-        
-        # 1. Strictly Under 10% (9.9% or lower)
-        cond_under_10 = all(stats[i] < 10.0 for i in [0, 1, 2])
-        
-        # 2. Not Extremes (Not Least, Not 2nd Least, Not Most)
-        extremes = [ranks['least'], ranks['second_least'], ranks['most']]
-        cond_not_extremes = (0 not in extremes) and (1 not in extremes) and (2 not in extremes)
-        
-        # 3. Decreasing Trend (Current % < Previous %)
-        cond_decreasing = all(stats[i] <= prev[i] for i in [0, 1, 2])
-        
-        # 4. Ready Status
-        is_ready = cond_under_10 and cond_not_extremes and cond_decreasing
-        
-        data_store['logic_state'] = {
-            'cond_under_10': cond_under_10,
-            'cond_not_extremes': cond_not_extremes,
-            'cond_decreasing': cond_decreasing,
-            'ready': is_ready
-        }
-
-        # Status Message Logic
-        if data_store['active'] and not data_store['is_trading']:
-            if not cond_under_10:
-                data_store['status'] = "Waiting: 0, 1, or 2 is above 10%"
-            elif not cond_not_extremes:
-                data_store['status'] = f"Waiting: 0, 1, or 2 is an Extreme (Lowest: {ranks['least']})"
-            elif not cond_decreasing:
-                data_store['status'] = "Waiting: 0, 1, or 2 is Rising"
-            elif is_ready:
-                data_store['status'] = "⚠️ PERFECT SETUP: Waiting for Trigger (0, 1, 2)..."
-        
-        # TRIGGER
-        if data_store['active'] and not data_store['is_trading']:
-            if is_ready and last_digit <= 2:
-                asyncio.run_coroutine_threadsafe(execute_trade(api, "DIGITOVER", "Strict Sniper"), loop)
-
-    except Exception as e:
-        print(f"Tick Error: {e}")
-
-# --- RUNNER ---
-async def run_trader_loop():
+async def run_system():
     global data_store
     api = None
     while True:
@@ -240,105 +173,142 @@ async def run_trader_loop():
             if api is None:
                 api = DerivAPI(app_id=APP_ID)
                 token = DEFAULT_TOKEN_REAL if data_store['account_type'] == 'real' else DEFAULT_TOKEN_DEMO
-                if not token: await asyncio.sleep(2); continue
+                if not token: await asyncio.sleep(1); continue
+                
                 await api.authorize(token)
                 
-                # Fetch History (1000 Ticks)
+                # FETCH HISTORY (BLOCKING)
                 hist = await api.ticks_history({'ticks_history': data_store['symbol'], 'count': 1000, 'end': 'latest', 'style': 'ticks'})
                 data_store['digits'] = deque([int(str(p)[-1]) for p in hist['history']['prices']], maxlen=1000)
-                update_statistics()
+                data_store['prices'] = deque(hist['history']['prices'], maxlen=1000)
+                data_store['times'] = deque([datetime.fromtimestamp(t) for t in hist['history']['times']], maxlen=1000)
                 
+                update_statistics()
+                data_store['is_ready'] = True # UNLOCK UI
+                
+                # LIVE STREAM
                 stream = await api.subscribe({'ticks': data_store['symbol']})
                 loop = asyncio.get_running_loop()
-                stream.subscribe(lambda t: process_tick(t, api, loop))
+                stream.subscribe(lambda t: process_tick(t))
             
-            if api: 
+            if api:
                 try: 
                     bal = await api.balance()
                     data_store['balance'] = f"${bal['balance']['balance']}"
                 except: pass
+            
             await asyncio.sleep(2)
-        except: api = None; await asyncio.sleep(5)
+        except: api = None; await asyncio.sleep(2)
 
-# --- UI CALLBACKS ---
+def process_tick(tick):
+    try:
+        quote = float(tick['tick']['quote'])
+        epoch = int(tick['tick']['epoch'])
+        digit = int(str(quote)[-1])
+        
+        data_store['digits'].append(digit)
+        data_store['prices'].append(quote)
+        data_store['times'].append(datetime.fromtimestamp(epoch))
+        update_statistics()
+    except: pass
+
+# --- CALLBACKS ---
 @app.callback(
-    [Output('live-balance', 'children'), Output('live-profit', 'children'),
-     Output('main-status', 'children'), Output('performance-table', 'children'),
-     Output('logic-checklist', 'children'), Output('trade-log-table', 'children'),
-     Output('control-feedback', 'children')],
-    [Input('ui-update', 'n_intervals'), Input('btn-start', 'n_clicks'), Input('btn-stop', 'n_clicks')],
-    [State('account-type', 'value'), State('stake-input', 'value'), State('target-input', 'value'), 
-     State('stop-input', 'value'), State('token-demo', 'value'), State('token-real', 'value')]
+    [Output('main-chart', 'figure'),
+     Output('deriv-circles', 'children'),
+     Output('live-balance', 'children'),
+     Output('logic-status-box', 'children'),
+     Output('trade-feedback', 'children')],
+    [Input('ui-update', 'n_intervals'),
+     Input('btn-buy', 'n_clicks')],
+    [State('market-selector', 'value'),
+     State('account-type', 'value'),
+     State('stake-input', 'value')]
 )
-def update_ui(n, start, stop, acc, stake, target, sl, t_demo, t_real):
-    ctx_msg = ctx.triggered_id
-    if ctx_msg == 'btn-start': data_store['active'] = True
-    elif ctx_msg == 'btn-stop': data_store['active'] = False
-    
-    data_store['stake'] = float(stake or 2)
-    data_store['target'] = float(target or 20)
-    data_store['stop_loss'] = float(sl or 50)
+def update_ui(n, btn_buy, market, acc, stake):
+    trigger = ctx.triggered_id
+    data_store['symbol'] = market
     data_store['account_type'] = acc
-    global DEFAULT_TOKEN_DEMO, DEFAULT_TOKEN_REAL
-    DEFAULT_TOKEN_DEMO, DEFAULT_TOKEN_REAL = t_demo, t_real
 
-    # 1. PERFORMANCE MONITOR TABLE
+    # 1. HANDLE BUY CLICK
+    feedback = ""
+    if trigger == 'btn-buy':
+        loop = asyncio.new_event_loop()
+        api = DerivAPI(app_id=APP_ID) # Temp API for execution
+        async def quick_trade():
+            await api.authorize(DEFAULT_TOKEN_REAL if acc == 'real' else DEFAULT_TOKEN_DEMO)
+            return await check_and_trade(api, "DIGITOVER", "2", float(stake), "OVER")
+        
+        success, msg = loop.run_until_complete(quick_trade())
+        feedback = html.Div(msg, style={'color': 'green' if success else 'red'})
+        loop.close()
+
+    # 2. CHART (Deriv Style - Area)
+    fig = go.Figure()
+    if data_store['is_ready']:
+        fig.add_trace(go.Scatter(
+            x=list(data_store['times'])[-50:], 
+            y=list(data_store['prices'])[-50:],
+            fill='tozeroy',
+            mode='lines+markers',
+            line=dict(color='#888', width=1),
+            marker=dict(size=4, color='#cc0000'), # Red dot for tick
+            fillcolor='rgba(200,200,200,0.2)'
+        ))
+    fig.update_layout(
+        margin=dict(l=40, r=20, t=20, b=20),
+        plot_bgcolor='white', paper_bgcolor='white',
+        xaxis=dict(showgrid=False), yaxis=dict(gridcolor='#eee')
+    )
+
+    # 3. CIRCLES
     stats = data_store['digit_stats']
-    prev = data_store['prev_stats']
-    ranks = data_store['ranks']
-    
-    rows = [html.Tr([html.Th("Digit"), html.Th("Percentage"), html.Th("Trend"), html.Th("Rank Status")], style={'color': '#888', 'fontSize': '12px'})]
-    
+    circles = []
     for d in range(10):
         p = stats.get(d, 0)
-        trend = "🔺 Rising" if p > prev.get(d, 0) else "🔻 Dropping" if p < prev.get(d, 0) else "➡ Flat"
-        trend_color = '#ff3333' if "Rising" in trend and d<=2 else '#00ff88' if "Dropping" in trend and d<=2 else '#888'
+        # Deriv Color Logic
+        c = '#333' # Default Text
+        bg = '#fff'
+        border = '2px solid #ccc'
         
-        # Rank Logic
-        rank_text = "Mid"
-        rank_color = '#888'
-        if d == ranks.get('least'): rank_text = "⚠️ LOWEST"; rank_color = '#ff3333'
-        elif d == ranks.get('second_least'): rank_text = "⚠️ 2nd LOW"; rank_color = '#ffaa00'
-        elif d == ranks.get('most'): rank_text = "👑 HIGHEST"; rank_color = '#00ff88'
+        if d <= 2: bg = '#fffbe6'; border = '2px solid #ffe58f' # Yellow Zone
         
-        # Highlight 0-2
-        bg = '#222'
-        if d <= 2:
-            bg = '#1a1a2e'
-            if p >= 10.0: rank_text += " (TOO HIGH)"; rank_color = '#ff3333'
-        
-        rows.append(html.Tr([
-            html.Td(str(d), style={'fontWeight': 'bold', 'color': '#fff'}),
-            html.Td(f"{p:.1f}%", style={'color': '#fff'}),
-            html.Td(trend, style={'color': trend_color, 'fontSize': '11px'}),
-            html.Td(rank_text, style={'color': rank_color, 'fontSize': '11px', 'fontWeight': 'bold'})
-        ], style={'backgroundColor': bg}))
-    
-    perf_table = html.Table(rows, style={'width': '100%', 'borderCollapse': 'collapse'})
+        # Heatmap Colors
+        bar_h = p * 3 # Height based on %
+        bar_c = '#00a79e' # Blueish
+        if p >= 12: bar_c = '#008832' # Green
+        if p <= 8: bar_c = '#cc0000'  # Red
 
-    # 2. LOGIC CHECKLIST
-    logic = data_store['logic_state']
-    def item(label, ok): return html.Div(f"{'✅' if ok else '⏳'} {label}", style={'color': '#00ff88' if ok else '#666', 'fontSize': '12px'})
-    checklist = [
-        item("All 0,1,2 < 10%", logic['cond_under_10']),
-        item("Not Lowest/2nd Lowest", logic['cond_not_extremes']),
-        item("Trend Decreasing", logic['cond_decreasing']),
-        item("READY TO FIRE", logic['ready'])
-    ]
+        circles.append(html.Div([
+            html.Div(f"{p:.1f}%", style={'fontSize': '10px', 'color': bar_c, 'fontWeight': 'bold'}),
+            html.Div(style={'height': f'{bar_h}px', 'width': '6px', 'backgroundColor': bar_c, 'borderRadius': '3px', 'margin': '2px 0'}),
+            html.Div(str(d), style={'width': '24px', 'height': '24px', 'borderRadius': '50%', 'border': border, 'backgroundColor': bg, 'display': 'flex', 'alignItems': 'center', 'justifyContent': 'center', 'fontSize': '12px', 'fontWeight': 'bold'})
+        ], style={'display': 'flex', 'flexDirection': 'column', 'alignItems': 'center', 'margin': '0 5px', 'justifyContent': 'flex-end', 'height': '100%'}))
 
-    # 3. TRADE LOG
-    log_rows = []
-    for t in data_store['trade_log']:
-        c = '#00ff88' if 'WIN' in t['Result'] else '#ff3333' if 'LOSS' in t['Result'] else '#ffff00'
-        log_rows.append(html.Tr([html.Td(t['Time']), html.Td(f"${t['Stake']}"), html.Td(t['Result'], style={'color': c}), html.Td(t['Profit'], style={'color': c})], style={'fontSize': '11px'}))
-    
-    return data_store['balance'], f"${data_store['current_profit']:.2f}", \
-           data_store['status'], perf_table, checklist, html.Table(log_rows, style={'width': '100%'}), \
-           f"Mode: {acc.upper()}"
+    # 4. LOGIC BOX
+    if not data_store['is_ready']:
+        logic_msg = "⏳ LOADING 1000 TICKS..."
+    else:
+        # Check Logic for display
+        cond_under_10 = all(stats[i] < 10.0 for i in [0, 1, 2])
+        ranks = data_store['ranks']
+        extremes = [ranks.get('least'), ranks.get('second_least'), ranks.get('most')]
+        cond_not_extremes = (0 not in extremes) and (1 not in extremes) and (2 not in extremes)
+        cond_decreasing = all(stats[i] <= data_store['prev_stats'][i] for i in [0, 1, 2])
 
+        logic_msg = html.Div([
+            html.Div(f"{'✅' if cond_under_10 else '❌'} Lows < 10% (0: {stats[0]:.1f}%, 1: {stats[1]:.1f}%, 2: {stats[2]:.1f}%)"),
+            html.Div(f"{'✅' if cond_not_extremes else '❌'} Not Extremes (Least: {ranks.get('least')})"),
+            html.Div(f"{'✅' if cond_decreasing else '❌'} Trends Dropping"),
+            html.Div("READY TO TRADE" if (cond_under_10 and cond_not_extremes and cond_decreasing) else "WAITING...", style={'fontWeight': 'bold', 'marginTop': '10px', 'color': 'green' if cond_under_10 and cond_not_extremes and cond_decreasing else 'red'})
+        ])
+
+    return fig, circles, data_store['balance'], logic_msg, feedback
+
+# --- THREAD ---
 def start_loop(loop):
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_trader_loop())
+    loop.run_until_complete(run_system())
 
 if __name__ == '__main__':
     loop = asyncio.new_event_loop()
